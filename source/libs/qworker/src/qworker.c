@@ -1640,7 +1640,6 @@ int32_t qWorkerInit(int8_t nodeType, int32_t nodeId, void **qWorkerMgmt, const S
   mgmt->schHash = taosHashInit(mgmt->cfg.maxSchedulerNum, taosGetDefaultHashFunction(TSDB_DATA_TYPE_UBIGINT), false,
                                HASH_ENTRY_LOCK);
   if (NULL == mgmt->schHash) {
-    taosMemoryFreeClear(mgmt);
     qError("init %d scheduler hash failed", mgmt->cfg.maxSchedulerNum);
     QW_ERR_JRET(terrno);
   }
@@ -1693,7 +1692,7 @@ int32_t qWorkerInit(int8_t nodeType, int32_t nodeId, void **qWorkerMgmt, const S
 
 _return:
 
-  if (mgmt->refId >= 0) {
+  if (mgmt->refId > 0) {
     (void)qwRelease(mgmt->refId);  // ignore error
   } else {
     taosHashCleanup(mgmt->schHash);

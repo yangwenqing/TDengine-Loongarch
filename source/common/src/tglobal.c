@@ -435,10 +435,10 @@ bool     tsIfAdtFse = false;                    // ADT-FSE algorithom or origina
 char     tsCompressor[32] = "ZSTD_COMPRESSOR";  // ZSTD_COMPRESSOR or GZIP_COMPRESSOR
 
 // udf
-#if defined(WINDOWS) || !defined(USE_UDF)
-bool tsStartUdfd = false;
-#else
+#ifdef USE_UDF
 bool    tsStartUdfd = true;
+#else
+bool    tsStartUdfd = false;
 #endif
 
 // wal
@@ -2686,7 +2686,7 @@ int32_t readCfgFile(const char *path, bool isGlobal) {
     array = taosGetLocalCfg(tsCfg);
     snprintf(filename, sizeof(filename), "%s%sdnode%sconfig%slocal.json", path, TD_DIRSEP, TD_DIRSEP, TD_DIRSEP);
   }
-  uInfo("start to read config file:%s", filename);
+  uInfo("load config file:%s", filename);
 
   if (!taosCheckExistFile(filename)) {
     uInfo("config file:%s does not exist", filename);
