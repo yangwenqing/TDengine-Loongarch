@@ -21,6 +21,7 @@
 #include "uv.h"
 #endif
 
+#include "dmRepair.h"
 #include "dmInt.h"
 #include "tfs.h"
 
@@ -134,11 +135,15 @@ int32_t dmProcessNodeMsg(SMgmtWrapper *pWrapper, SRpcMsg *pMsg);
 
 // dmMonitor.c
 void dmSendMonitorReport();
+void dmSendMetricsReport();
 void dmMonitorCleanExpiredSamples();
+void dmMetricsCleanExpiredSamples();
 void dmSendAuditRecords();
 void dmGetVnodeLoads(SMonVloadInfo *pInfo);
 void dmGetVnodeLoadsLite(SMonVloadInfo *pInfo);
+void dmSetVnodeSyncTimeout();
 void dmGetMnodeLoads(SMonMloadInfo *pInfo);
+void dmSetMnodeSyncTimeout();
 void dmGetQnodeLoads(SQnodeLoad *pInfo);
 
 #ifdef __cplusplus

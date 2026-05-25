@@ -36,9 +36,9 @@ func TestMain(m *testing.M) {
 	}
 	defer conn.Close()
 	ctx := context.Background()
-	conn.Query(context.Background(), fmt.Sprintf("drop database if exists %s", conf.Metrics.Database.Name), util.GetQidOwn())
+	conn.Query(context.Background(), fmt.Sprintf("drop database if exists %s", conf.Metrics.Database.Name), util.GetQidOwn(config.Conf.InstanceID))
 
-	if _, err = conn.Exec(ctx, fmt.Sprintf("create database if not exists %s", dbName), util.GetQidOwn()); err != nil {
+	if _, err = conn.Exec(ctx, fmt.Sprintf("create database if not exists %s", dbName), util.GetQidOwn(config.Conf.InstanceID)); err != nil {
 		logger.Errorf("execute sql: %s, error: %s", fmt.Sprintf("create database %s", dbName), err)
 	}
 	gin.SetMode(gin.ReleaseMode)
@@ -63,10 +63,12 @@ func TestMain(m *testing.M) {
 	CreatTables(conf.TDengine.Username, conf.TDengine.Password, conf.TDengine.Host, conf.TDengine.Port, conf.TDengine.Usessl, conf.Metrics.Database.Name, createList)
 
 	processor := process.NewProcessor(conf)
-	node := NewNodeExporter(processor)
+	memoryStore, _ := process.NewMemoryStore(5 * time.Minute)
+	defer memoryStore.Close()
+	node := NewNodeExporter(processor, memoryStore, reporter)
 	node.Init(router)
 	m.Run()
-	if _, err = conn.Exec(ctx, fmt.Sprintf("drop database if exists %s", dbName), util.GetQidOwn()); err != nil {
+	if _, err = conn.Exec(ctx, fmt.Sprintf("drop database if exists %s", dbName), util.GetQidOwn(config.Conf.InstanceID)); err != nil {
 		logger.Errorf("execute sql: %s, error: %s", fmt.Sprintf("drop database %s", dbName), err)
 	}
 }
@@ -233,11 +235,11 @@ func TestPutMetrics(t *testing.T) {
 	}
 
 	defer func() {
-		_, _ = conn.Query(context.Background(), fmt.Sprintf("drop database if exists %s", conf.Metrics.Database.Name), util.GetQidOwn())
+		_, _ = conn.Query(context.Background(), fmt.Sprintf("drop database if exists %s", conf.Metrics.Database.Name), util.GetQidOwn(config.Conf.InstanceID))
 	}()
 
 	ctx := context.Background()
-	data, err := conn.Query(ctx, "select info from log_summary", util.GetQidOwn())
+	data, err := conn.Query(ctx, "select info from log_summary", util.GetQidOwn(config.Conf.InstanceID))
 	if err != nil {
 		logger.Errorf("execute sql:%s, error:%s", "select * from log_summary", err)
 		t.Fatal(err)
@@ -273,7 +275,7 @@ func TestPutMetrics(t *testing.T) {
 	}
 
 	for table, tableInfo := range tables {
-		data, err = conn.Query(ctx, fmt.Sprintf("select %s from %s", tableInfo.TsName, table), util.GetQidOwn())
+		data, err = conn.Query(ctx, fmt.Sprintf("select %s from %s", tableInfo.TsName, table), util.GetQidOwn(config.Conf.InstanceID))
 		if err != nil {
 			logger.Errorf("execute sql:%s, error:%s", "select * from "+table, err)
 			t.Fatal(err)
@@ -287,11 +289,11 @@ func TestPutMetrics(t *testing.T) {
 	conf.Drop = "old_taosd_metric_stables"
 	cmd.Process(conf)
 
-	data, err = conn.Query(ctx, "select * from  information_schema.ins_stables where stable_name = 'm_info'", util.GetQidOwn())
+	data, err = conn.Query(ctx, "select * from information_schema.ins_stables where stable_name = 'm_info'", util.GetQidOwn(config.Conf.InstanceID))
 	if err != nil {
 		logger.Errorf("execute sql:%s, error:%s", "m_info is not droped", err)
 		t.Fatal(err)
 	}
 	assert.Equal(t, 0, len(data.Data))
-	logger.Infof("ALL  OK  !!!")
+	logger.Infof("ALL OK!!!")
 }

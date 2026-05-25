@@ -59,20 +59,25 @@ void freeNodes(SNode* head) {
     SNode *next = head;
     while(next) {
         SNode *old = next;
-        next = next->next; 
+        next = next->next;
         free(old);
     }
 }
 
-// return true to do retry , false no retry , code is error code 
+// return true to do retry , false no retry , code is error code
 bool canRetry(int32_t code, int8_t type) {
     // rpc error
     if (code >= TSDB_CODE_RPC_BEGIN && code <= TSDB_CODE_RPC_END) {
         return true;
     }
 
+    // websocket error
+    if (code >= TSDB_CODE_WBS_NETWORK_BEGIN && code <= TSDB_CODE_WBS_NETWORK_END) {
+        return true;
+    }
+
     // single code
-    int32_t codes[] = {0x0000ffff};
+    int32_t codes[] = {0x0000ffff, TSDB_CODE_VND_STOPPED};
     for(int32_t i = 0; i< sizeof(codes)/sizeof(int32_t); i++) {
         if (code == codes[i]) {
             return true;
@@ -125,8 +130,8 @@ static void print_json_string(json_t *element, int indent) {
     printf("JSON String: \"%s\"\n", json_string_value(element));
 }
 
-const char *json_plural(size_t count) { 
-    return count == 1 ? "" : "s"; 
+const char *json_plural(size_t count) {
+    return count == 1 ? "" : "s";
 }
 
 static void print_json_object(json_t *element, int indent) {
@@ -187,8 +192,8 @@ void print_json_aux(json_t *element, int indent) {
     }
 }
 
-void print_json(json_t *root) { 
-    print_json_aux(root, 0); 
+void print_json(json_t *root) {
+    print_json_aux(root, 0);
 }
 
 json_t *load_json(char *jsonbuf) {
@@ -338,9 +343,9 @@ TAOS *taosConnect(const char *dbName) {
             port = defaultPort(g_args.connMode, g_args.dsn);
         }
 
-        sprintf(show, "host:%s port:%d ", host, port);
-    }    
-    
+        (void)snprintf(show, sizeof(show), "host:%s port:%d ", host, port);
+    }
+
     //
     // connect
     //
@@ -386,6 +391,7 @@ TAOS_RES *taosQuery(TAOS *taos, const char *sql, int32_t *code) {
             if (i > 0) {
                 okPrint("Retry %d to execute taosQuery %s successfully!\n", i, sql);
             }
+            debugPrint("debug: taosQuery succeeded. sql=%s \n", sql);
             return res;
         }
 
@@ -394,7 +400,7 @@ TAOS_RES *taosQuery(TAOS *taos, const char *sql, int32_t *code) {
 
         // can retry
         if(!canRetry(*code, RETRY_TYPE_QUERY)) {
-            infoPrint("%s", "error code not in retry range , give up retry.\n");
+            infoPrint("%s", "error code not in retry range, give up retry.\n");
             return NULL;
         }
 
@@ -436,28 +442,33 @@ uint32_t bkdrHash(const char *str) {
 // Initialize the hash table
 void hashMapInit(HashMap *map) {
     memset(map->buckets, 0, sizeof(map->buckets));
-    pthread_mutex_init(&map->lock, NULL);
+    if (pthread_mutex_init(&map->lock, NULL) != 0) {
+        perror("pthread_mutex_init failed");
+        abort();
+    }
 }
 
 // Insert a key-value pair
 bool hashMapInsert(HashMap *map, const char *key, void *value) {
     // lock map
-    pthread_mutex_lock(&map->lock);
+    (void)pthread_mutex_lock(&map->lock);
     uint32_t hash = bkdrHash(key) % HASH32_MAP_MAX_BUCKETS;
     HashMapEntry *entry = (HashMapEntry *)malloc(sizeof(HashMapEntry));
     if (entry == NULL) {
-        pthread_mutex_unlock(&map->lock);
+        (void)pthread_mutex_unlock(&map->lock);
         return false;
     }
-    
+
     // set
     entry->key         = strdup(key);
     entry->value       = value; // StbChange
     entry->next        = map->buckets[hash];
     map->buckets[hash] = entry;
-    
+
     // unlock map
-    pthread_mutex_unlock(&map->lock);
+    if (pthread_mutex_unlock(&map->lock) != 0) {
+        perror("pthread_mutex_unlock failed");
+    }
     return true;
 }
 
@@ -492,18 +503,19 @@ void hashMapDestroy(HashMap *map) {
         }
     }
     pthread_mutex_destroy(&map->lock);
-} 
+}
 
 
 //
 // -----------------  dbChagne -------------------------
 //
 
-// create 
+// create
 DBChange *createDbChange(const char *dbPath) {
     //TOTO
     DBChange * pDbChange = (DBChange *)calloc(1, sizeof(DBChange));
     pDbChange->dbPath    = dbPath;
+    hashMapInit(&pDbChange->stbMap);
 
     return pDbChange;
 }
@@ -513,7 +525,7 @@ void freeDBChange(DBChange *pDbChange) {
     // free stbChagne map
     hashMapDestroy(&pDbChange->stbMap);
 
-    // free 
+    // free
     free(pDbChange);
 }
 
@@ -543,15 +555,15 @@ void freeStbChange(StbChange *stbChange) {
 // generate part string
 char * genPartStr(ColDes *colDes, int from , int num) {
     // check valid
-    if (colDes == 0 || num == 0) {
+    if (colDes == NULL || num == 0) {
         return NULL;
     }
-    
+
     int32_t size  = 50 + num * (TSDB_COL_NAME_LEN + 2);
     char *partStr = calloc(1, size);
     int32_t pos   = 0;
     for (int32_t i = 0; i < num; i++) {
-        pos += sprintf(partStr + pos, 
+        pos += sprintf(partStr + pos,
                 i == 0 ? "(`%s`" : ",`%s`",
                 colDes[from + i].field);
     }
@@ -586,12 +598,12 @@ bool schemaNoChanged(RecordSchema *recordSchema, TableDes *tableDesSrv) {
         if (strcmp(local->field, srv->field) != 0) {
             // field name
             infoPrint("i=%d stb=%s field name changed. local:%s server:%s \n", i, stb, local->field, srv->field);
-            return false;    
+            return false;
         }
         // type
         if (local->type != srv->type) {
             infoPrint("i=%d stb=%s field name same but type changed. %s local:%d server:%d \n", i, stb, local->field, local->type, srv->type);
-            return false;    
+            return false;
         }
 
         // save local col idx
@@ -638,7 +650,7 @@ int32_t localCrossServer(DBChange *pDbChange, StbChange *pStbChange, RecordSchem
 
     // crossDes
     int newc = 0; // col num
-    int newt = 0; // tag num    
+    int newt = 0; // tag num
 
     // check schema no change
     if (schemaNoChanged(recordSchema, tableDesSrv)) {
@@ -676,9 +688,9 @@ int32_t localCrossServer(DBChange *pDbChange, StbChange *pStbChange, RecordSchem
     // check valid
     if (newc == 0) {
         // col must not zero
-        errorPrint("backup data schema no same column with server table:%s local col num:%d server col num:%d\n", 
+        errorPrint("backup data schema no same column with server table:%s local col num:%d server col num:%d\n",
             crossDes->name, recordSchema->tableDes->columns, crossDes->columns);
-        freeTbDes(crossDes, true);           
+        freeTbDes(crossDes, true);
         return -1;
     }
     if (newt == 0 && oldt > 0) {
@@ -695,14 +707,14 @@ int32_t localCrossServer(DBChange *pDbChange, StbChange *pStbChange, RecordSchem
 
     // save crossDes to StbChange
     pStbChange->tableDes = crossDes;
-    
+
     // gen part str
     pStbChange->strCols = genPartStr(pStbChange->tableDes->cols, 0,    newc);
     pStbChange->strTags = genPartStr(pStbChange->tableDes->cols, newc, newt);
 
     pStbChange->schemaChanged = true;
     // show change log
-    infoPrint("stb:%s have schema changed. server col:%d tag:%d local col:%d tag:%d\n", 
+    infoPrint("stb:%s have schema changed. server col:%d tag:%d local col:%d tag:%d\n",
                 recordSchema->stbName, oldc, oldt, newc, newt);
 
     return 0;
@@ -744,7 +756,7 @@ int32_t AddStbChanged(DBChange *pDbChange, const char* dbName, TAOS *taos, Recor
     StbChange *pStbChange = (StbChange *)calloc(1, sizeof(StbChange));
 
     //
-    // compare local & server and auto calc 
+    // compare local & server and auto calc
     //
     if (localCrossServer(pDbChange, pStbChange, recordSchema, tableDesSrv)) {
         errorPrint("%s() LN%d localCrossServer failed, db:%s stb:%s !\n", __func__, __LINE__, dbName, stbName);
@@ -754,7 +766,7 @@ int32_t AddStbChanged(DBChange *pDbChange, const char* dbName, TAOS *taos, Recor
     }
     freeTbDes(tableDesSrv, true);
     tableDesSrv = NULL;
-    
+
     // set out
     if (ppStbChange) {
         *ppStbChange = pStbChange;
@@ -802,7 +814,7 @@ static int32_t readStbSchemaCols( json_t *elements, ColDes *cols) {
 
     for (size_t i = 0; i < size; i++) {
         json_t *element = json_array_get(elements, i);
-        
+
         // loop read
         ColDes *col = cols + i;
         json_object_foreach(element, key, value) {
@@ -894,7 +906,7 @@ int32_t mFileToRecordSchema(char *avroFile, RecordSchema* recordSchema) {
     return ret;
 }
 
-// found 
+// found
 bool idxInBindTags(int16_t idx, TableDes* tableDes) {
     // check valid
     if (idx < 0 || tableDes == NULL) {
@@ -911,7 +923,7 @@ bool idxInBindTags(int16_t idx, TableDes* tableDes) {
     return false;
 }
 
-// found 
+// found
 bool idxInBindCols(int16_t idx, TableDes* tableDes) {
     // check valid
     if (idx < 0 || tableDes == NULL) {
@@ -932,7 +944,7 @@ bool idxInBindCols(int16_t idx, TableDes* tableDes) {
 // if avro folder changed, need have new stbChange*
 //
 StbChange* readFolderStbName(char *folder, DBChange *pDbChange) {
-    // compare avro file 
+    // compare avro file
     char stbFile[MAX_PATH_LEN] = {0};
 
     if (pDbChange == NULL) {
@@ -964,7 +976,7 @@ uint32_t getTbDesJsonSize(TableDes *tableDes, bool onlyColumn) {
     //
     // public
     //
-    uint32_t size = 
+    uint32_t size =
         ITEM_SPACE +                    // version 1
         ITEM_SPACE +                    // type: record
         ITEM_SPACE + TSDB_DB_NAME_LEN + // namespace: dbname
@@ -989,7 +1001,7 @@ uint32_t getStbSchemaSize(TableDes *tableDes) {
     //
     // stable schema
     //
-    uint32_t size = 
+    uint32_t size =
         ITEM_SPACE +                      // version 1
         ITEM_SPACE + TSDB_TABLE_NAME_LEN; // stbName
 
@@ -1002,14 +1014,14 @@ uint32_t getStbSchemaSize(TableDes *tableDes) {
 
 uint32_t colDesToJson(char *pstr, ColDes * colDes, uint32_t num) {
     uint32_t size = 0;
-    for(int32_t i = 0; i < num; i++) {
+    for(uint32_t i = 0; i < num; i++) {
         if (i > 0) {
             // append splite
             size += sprintf(pstr + size, ",");
         }
-        
+
         // field
-        size += sprintf(pstr + size, 
+        size += sprintf(pstr + size,
             "{\"name\":\"%s\", \"type\":%d}",
             colDes[i].field, colDes[i].type);
     }
@@ -1017,10 +1029,10 @@ uint32_t colDesToJson(char *pstr, ColDes * colDes, uint32_t num) {
 }
 
 
-// covert tableDes to json 
+// covert tableDes to json
 char* tableDesToJson(TableDes *tableDes) {
     // calloc
-    char *p = calloc(1, getStbSchemaSize(tableDes));    
+    char *p = calloc(1, getStbSchemaSize(tableDes));
     uint32_t size = 0;
     char *pstr = p;
     // stbName
@@ -1030,27 +1042,27 @@ char* tableDesToJson(TableDes *tableDes) {
         "\"%s\":\"%s\",",
         VERSION_KEY, VERSION_VAL,
         STBNAME_KEY, tableDes->name);
-    
+
     // cols
-    size += sprintf(pstr + size, 
+    size += sprintf(pstr + size,
         "\"cols\": [");
     size += colDesToJson(pstr + size,
         tableDes->cols, tableDes->columns);
-    size += sprintf(pstr + size, 
+    size += sprintf(pstr + size,
         "]");
 
     // tags
     if (tableDes->tags > 0) {
-        size += sprintf(pstr + size, 
+        size += sprintf(pstr + size,
             ",\"tags\": [");
         size += colDesToJson(pstr + size,
             tableDes->cols + tableDes->columns, tableDes->tags);
-        size += sprintf(pstr + size, 
+        size += sprintf(pstr + size,
             "]");
     }
 
     // end
-    size += sprintf(pstr + size, 
+    size += sprintf(pstr + size,
         "}");
 
     return p;

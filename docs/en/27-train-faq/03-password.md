@@ -28,7 +28,7 @@ CREATE USER user1 PASS 'Ab1!@#$%^&*()-_+=[]{}';
 <Tabs defaultValue="shell" groupId="component">
 <TabItem label="CLI" value="shell">
 
-In the [TDengine Command Line Interface (CLI)](../../tdengine-reference/tools/tdengine-cli/), note the following:
+In the [TDengine TSDB Command Line Interface (CLI)](../14-reference/02-tools/07-taos-cli.md), note the following:
 
 - If the `-p` parameter is used without a password, you will be prompted to enter a password, and any acceptable characters can be entered.
 - If the `-p` parameter is used with a password, and the password contains special characters, single quotes must be used.
@@ -43,7 +43,7 @@ taos -u user1 -pAb1\!\@\#\$\%\^\&\*\(\)\-\_\+\=\[\]\{\}
 </TabItem>
 <TabItem label="taosdump" value="taosdump">
 
-In [taosdump](../../tdengine-reference/tools/taosdump/), note the following:
+In [taosdump](../14-reference/02-tools/09-taosdump.md), note the following:
 
 - If the `-p` parameter is used without a password, you will be prompted to enter a password, and any acceptable characters can be entered.
 - If the `-p` parameter is used with a password, and the password contains special characters, single quotes or escaping must be used.
@@ -58,7 +58,7 @@ taosdump -u user1 -pAb1\!\@\#\$\%\^\&\*\(\)\-\_\+\=\[\]\{\} -D test
 </TabItem>
 <TabItem label="Benchmark" value="benchmark">
 
-In [taosBenchmark](../../tdengine-reference/tools/taosbenchmark/), note the following:
+In [taosBenchmark](../14-reference/02-tools/10-taosbenchmark.md), note the following:
 
 - If the `-p` parameter is used without a password, you will be prompted to enter a password, and any acceptable characters can be entered.
 - If the `-p` parameter is used with a password, and the password contains special characters, single quotes or escaping must be used.
@@ -74,7 +74,7 @@ When using `taosBenchmark -f <JSON>`, there are no restrictions on the password 
 </TabItem>
 <TabItem label="taosX" value="taosx">
 
-[taosX](../../tdengine-reference/components/taosx/) uses DSN to represent TDengine connections, in the format: `(taos|tmq)[+ws]://<user>:<pass>@<ip>:<port>`, where `<pass>` can contain special characters, such as: `taos+ws://user1:Ab1!@#$%^&*()-_+=[]{}@192.168.10.10:6041`.
+[taosX](../14-reference/01-components/04-taosx.md) uses DSN to represent TDengine connections, in the format: `(taos|tmq)[+ws]://<user>:<pass>@<ip>:<port>`, where `<pass>` can contain special characters, such as: `taos+ws://user1:Ab1!@#$%^&*()-_+=[]{}@192.168.10.10:6041`.
 
 Example of exporting data with user `user1`:
 
@@ -85,7 +85,7 @@ taosx -f 'taos://user1:Ab1!@#$%^&*()-_+=[]{}@localhost:6030?query=select * from 
 
 Note that if the password can be URL decoded, the URL decoded result will be used as the password. For example: `taos+ws://user1:Ab1%21%40%23%24%25%5E%26%2A%28%29-_%2B%3D%5B%5D%7B%7D@localhost:6041` is equivalent to `taos+ws://user1:Ab1!@#$%^&*()-_+=[]{}@localhost:6041`.
 
-No special handling is required in [Explorer](../../tdengine-reference/components/taosexplorer/), just use it directly.
+No special handling is required in [Explorer](../14-reference/01-components/07-explorer.md), just use it directly.
 
 </TabItem>
 
@@ -106,33 +106,34 @@ import java.nio.charset.StandardCharsets;
 import com.taosdata.jdbc.TSDBDriver;
 
 public class JdbcPassDemo {
-	public static void main(String[] args) throws Exception {
-		String password = "Ab1!@#$%^&*()-_+=[]{}";
-		String encodedPassword = URLEncoder.encode(password, StandardCharsets.UTF_8.toString());
-		String jdbcUrl = "jdbc:TAOS-WS://localhost:6041";
-		Properties connProps = new Properties();
-		connProps.setProperty(TSDBDriver.PROPERTY_KEY_USER, "user1");
-		connProps.setProperty(TSDBDriver.PROPERTY_KEY_PASSWORD, encodedPassword);
-		connProps.setProperty(TSDBDriver.PROPERTY_KEY_ENABLE_AUTO_RECONNECT, "true");
-		connProps.setProperty(TSDBDriver.PROPERTY_KEY_CHARSET, "UTF-8");
-		connProps.setProperty(TSDBDriver.PROPERTY_KEY_TIME_ZONE, "UTC-8");
+ public static void main(String[] args) throws Exception {
+  String password = "Ab1!@#$%^&*()-_+=[]{}";
+  String encodedPassword = URLEncoder.encode(password, StandardCharsets.UTF_8.toString());
+  String jdbcUrl = "jdbc:TAOS-WS://localhost:6041";
+  Properties connProps = new Properties();
+  connProps.setProperty(TSDBDriver.PROPERTY_KEY_USER, "user1");
+  connProps.setProperty(TSDBDriver.PROPERTY_KEY_PASSWORD, encodedPassword);
+  connProps.setProperty(TSDBDriver.PROPERTY_KEY_ENABLE_AUTO_RECONNECT, "true");
+  connProps.setProperty(TSDBDriver.PROPERTY_KEY_CHARSET, "UTF-8");
+  connProps.setProperty(TSDBDriver.PROPERTY_KEY_TIME_ZONE, "UTC-8");
+  connProps.setProperty(TSDBDriver.PROPERTY_KEY_VARCHAR_AS_STRING, "true");
 
-		try (Connection conn = DriverManager.getConnection(jdbcUrl, connProps)) {
-			System.out.println("Connected to " + jdbcUrl + " successfully.");
+  try (Connection conn = DriverManager.getConnection(jdbcUrl, connProps)) {
+   System.out.println("Connected to " + jdbcUrl + " successfully.");
 
-			// you can use the connection for execute SQL here
+   // you can use the connection for execute SQL here
 
-		} catch (Exception ex) {
-			// please refer to the JDBC specifications for detailed exceptions info
-			System.out.printf("Failed to connect to %s, %sErrMessage: %s%n",
-					jdbcUrl,
-					ex instanceof SQLException ? "ErrCode: " + ((SQLException) ex).getErrorCode() + ", " : "",
-					ex.getMessage());
-			// Print stack trace for context in examples. Use logging in production.
-			ex.printStackTrace();
-			throw ex;
-		}
-	}
+  } catch (Exception ex) {
+   // please refer to the JDBC specifications for detailed exceptions info
+   System.out.printf("Failed to connect to %s, %sErrMessage: %s%n",
+     jdbcUrl,
+     ex instanceof SQLException ? "ErrCode: " + ((SQLException) ex).getErrorCode() + ", " : "",
+     ex.getMessage());
+   // Print stack trace for context in examples. Use logging in production.
+   ex.printStackTrace();
+   throw ex;
+  }
+ }
 }
 ```
 
@@ -194,27 +195,28 @@ Starting from version 3.6.0, Go supports passwords containing special characters
 package main
 
 import (
-	"database/sql"
-	"fmt"
-	"log"
-	"net/url"
+ "database/sql"
+ "fmt"
+ "log"
+ "net/url"
 
-	_ "github.com/taosdata/driver-go/v3/taosWS"
+ _ "github.com/taosdata/driver-go/v3/taosWS"
 )
 
 func main() {
-	var user = "user1"
-	var password = "Ab1!@#$%^&*()-_+=[]{}"
-	var encodedPassword = url.QueryEscape(password)
-	var taosDSN = user + ":" + encodedPassword + "@ws(localhost:6041)/"
-	taos, err := sql.Open("taosWS", taosDSN)
-	if err != nil {
-		log.Fatalln("Failed to connect to " + taosDSN + "; ErrMessage: " + err.Error())
-	}
-	fmt.Println("Connected to " + taosDSN + " successfully.")
-	defer taos.Close()
+ var user = "user1"
+ var password = "Ab1!@#$%^&*()-_+=[]{}"
+ var encodedPassword = url.QueryEscape(password)
+ var taosDSN = user + ":" + encodedPassword + "@ws(localhost:6041)/"
+ taos, err := sql.Open("taosWS", taosDSN)
+ if err != nil {
+  log.Fatalln("Failed to connect to " + taosDSN + "; ErrMessage: " + err.Error())
+ }
+ fmt.Println("Connected to " + taosDSN + " successfully.")
+ defer taos.Close()
 }
 ```
+
 </TabItem>
 
 <TabItem label="Rust" value="rust">

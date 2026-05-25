@@ -440,6 +440,11 @@ int32_t taosVariantCreateFromBinary(SVariant *pVar, const char *pz, size_t len, 
       pVar->nLen = (int32_t)len;
       break;
     }
+    case TSDB_DATA_TYPE_BLOB:
+    case TSDB_DATA_TYPE_MEDIUMBLOB: {
+      uError("SVariant: BLOB and MEDIUMBLOB are not supported, type:%d", type);
+      return TSDB_CODE_INVALID_DATA_FMT;
+    }
 
     default:
       pVar->i = GET_INT32_VAL(pz);
@@ -455,7 +460,7 @@ void taosVariantDestroy(SVariant *pVar) {
 
   if (pVar->nType == TSDB_DATA_TYPE_BINARY || pVar->nType == TSDB_DATA_TYPE_NCHAR ||
       pVar->nType == TSDB_DATA_TYPE_JSON || pVar->nType == TSDB_DATA_TYPE_GEOMETRY ||
-      pVar->nType == TSDB_DATA_TYPE_VARBINARY) {
+      pVar->nType == TSDB_DATA_TYPE_VARBINARY || pVar->nType == TSDB_DATA_TYPE_DECIMAL) {
     taosMemoryFreeClear(pVar->pz);
     pVar->nLen = 0;
   }
@@ -553,6 +558,8 @@ char *taosVariantGet(SVariant *pVar, int32_t type) {
       return (char *)&pVar->f;
     case TSDB_DATA_TYPE_BINARY:
     case TSDB_DATA_TYPE_VARBINARY:
+    case TSDB_DATA_TYPE_BLOB:
+    case TSDB_DATA_TYPE_MEDIUMBLOB:
     case TSDB_DATA_TYPE_JSON:
     case TSDB_DATA_TYPE_GEOMETRY:
       return (char *)pVar->pz;

@@ -38,6 +38,9 @@
 #define SHELL_HISTORY_FILE                     ".taos_history"
 #define SHELL_DEFAULT_RES_SHOW_NUM             100
 #define SHELL_DEFAULT_MAX_BINARY_DISPLAY_WIDTH 30
+#define SHELL_SHOW_TOKEN_DISPLAY_WIDTH         (TSDB_TOKEN_LEN - 1)
+#define SHELL_SHOW_TOTP_SECRET_DISPLAY_WIDTH   ((TSDB_TOTP_SECRET_LEN * 8 + 4) / 5) // base32 encoding length
+#define SHELL_TOKEN_LEN                        256
 #define SHELL_MAX_PKG_LEN                      2 * 1024 * 1024
 #define SHELL_MIN_PKG_LEN                      1
 #define SHELL_DEF_PKG_LEN                      1024
@@ -66,9 +69,13 @@ typedef struct {
   const char* commands;
   const char* netrole;
   char        file[PATH_MAX];
-  char        password[TSDB_USET_PASSWORD_LONGLEN];
+  char        password[TSDB_USER_PASSWORD_LONGLEN + 1];
+#ifdef TD_ENTERPRISE
+  char        token[SHELL_TOKEN_LEN];
+#endif  
   bool        is_gen_auth;
   bool        is_bi_mode;
+  bool        is_binary_as_hex;
   bool        is_raw_time;
   bool        is_version;
   bool        is_dump_config;
@@ -121,6 +128,7 @@ int32_t shellParseArgs(int32_t argc, char* argv[]);
 
 // shellCommand.c
 int32_t shellReadCommand(char* command);
+int32_t shellCountPrefixOnes(uint8_t c);
 
 // shellEngine.c
 int32_t shellExecute(int argc, char *argv[]);
@@ -139,6 +147,7 @@ void    shellCheckServerStatus();
 bool    shellRegexMatch(const char* s, const char* reg, int32_t cflags);
 int32_t getDsnEnv();
 void    shellExit();
+void trimStr(char *srcInfo, char *removeStr);
 
 // shellNettest.c
 void shellTestNetWork();

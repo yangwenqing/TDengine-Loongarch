@@ -14,6 +14,7 @@
  */
 
 #include "wrapper.h"
+#include "wrapperHint.h"
 
 #ifdef WINDOWS
 #define DRIVER_NATIVE_NAME    "taosnative.dll"
@@ -50,6 +51,17 @@ static int32_t taosGetDevelopPath(char *driverPath, const char *driverName) {
   return ret;
 }
 
+void taosDriverEnvInit() {
+  const char *driver = getenv("TDENGINE_DRIVER");
+  if (driver) {
+    if (strcasecmp(driver, STR_NATIVE) == 0) {
+      tsDriverType = DRIVER_NATIVE;
+    } else if (strcasecmp(driver, STR_WEBSOCKET) == 0) {
+      tsDriverType = DRIVER_WEBSOCKET;
+    }
+  }
+}
+
 int32_t taosDriverInit(EDriverType driverType) {
   int32_t     code = -1;
   char        driverPath[PATH_MAX + 32] = {0};
@@ -72,7 +84,7 @@ int32_t taosDriverInit(EDriverType driverType) {
     tsDriver = taosLoadDll(driverName);
   }
 
-  // load from install path on mac
+// load from install path on mac
 #if defined(DARWIN)
   if (tsDriver == NULL) {
     snprintf(driverPath, PATH_MAX, "/usr/local/lib/%s", driverName);
@@ -82,18 +94,24 @@ int32_t taosDriverInit(EDriverType driverType) {
 
   if (tsDriver == NULL) {
     printf("failed to load %s since %s [0x%X]\r\n", driverName, terrstr(), terrno);
+    showWrapperHint(terrno);
     return code;
   }
 
-  // printf("load driver from %s\r\n", driverPath);
   LOAD_FUNC(fp_taos_set_config, "taos_set_config");
 
   LOAD_FUNC(fp_taos_init, "taos_init");
   LOAD_FUNC(fp_taos_cleanup, "taos_cleanup");
   LOAD_FUNC(fp_taos_options, "taos_options");
+  LOAD_FUNC(fp_taos_set_option, "taos_set_option");
   LOAD_FUNC(fp_taos_options_connection, "taos_options_connection");
   LOAD_FUNC(fp_taos_connect, "taos_connect");
+  LOAD_FUNC(fp_taos_connect_totp, "taos_connect_totp");
+  LOAD_FUNC(fp_taos_connect_token, "taos_connect_token");
+  LOAD_FUNC(fp_taos_connect_test, "taos_connect_test");
   LOAD_FUNC(fp_taos_connect_auth, "taos_connect_auth");
+  LOAD_FUNC(fp_taos_connect_with, "taos_connect_with");
+  LOAD_FUNC(fp_taos_connect_with_dsn, "taos_connect_with_dsn");
   LOAD_FUNC(fp_taos_close, "taos_close");
 
   LOAD_FUNC(fp_taos_data_type, "taos_data_type");
@@ -170,6 +188,7 @@ int32_t taosDriverInit(EDriverType driverType) {
   LOAD_FUNC(fp_taos_get_server_info, "taos_get_server_info");
   LOAD_FUNC(fp_taos_get_client_info, "taos_get_client_info");
   LOAD_FUNC(fp_taos_get_current_db, "taos_get_current_db");
+  LOAD_FUNC(fp_taos_get_connection_info, "taos_get_connection_info");
 
   LOAD_FUNC(fp_taos_errstr, "taos_errstr");
   LOAD_FUNC(fp_taos_errno, "taos_errno");
@@ -191,6 +210,10 @@ int32_t taosDriverInit(EDriverType driverType) {
   LOAD_FUNC(fp_taos_set_notify_cb, "taos_set_notify_cb");
 
   LOAD_FUNC(fp_taos_fetch_whitelist_a, "taos_fetch_whitelist_a");
+
+  LOAD_FUNC(fp_taos_fetch_whitelist_dual_stack_a, "taos_fetch_whitelist_dual_stack_a");
+  LOAD_FUNC(fp_taos_fetch_ip_whitelist_a, "taos_fetch_ip_whitelist_a");
+  LOAD_FUNC(fp_taos_fetch_datetime_whitelist_a, "taos_fetch_datetime_whitelist_a");
 
   LOAD_FUNC(fp_taos_set_conn_mode, "taos_set_conn_mode");
 
@@ -257,11 +280,14 @@ int32_t taosDriverInit(EDriverType driverType) {
   LOAD_FUNC(fp_taos_write_crashinfo, "taos_write_crashinfo");
   LOAD_FUNC(fp_getBuildInfo, "getBuildInfo");
 
+  LOAD_FUNC(fp_taos_connect_is_alive, "taos_connect_is_alive");
+
   code = 0;
 
 _OVER:
   if (code != 0) {
     printf("failed to load function %s from %s since %s [0x%X]\r\n", funcName, driverPath, terrstr(), terrno);
+    showWrapperHint(terrno);
     taosDriverCleanup();
   }
 

@@ -3,12 +3,13 @@
 # Generate install package for Linux Platform
 
 set -e
-
-while getopts "e:v:m:" opt; do
+all_models=0
+while getopts "e:v:m:a" opt; do
     case "$opt" in
         e) edition="$OPTARG" ;;  # -e enterprise/community
-        v) version="$OPTARG" ;;  # -v version
-        m) model_dir="$OPTARG" ;;  # -m model_dir
+        v) version="$OPTARG" ;;  # -v tdgpt version
+        m) model_dir="$OPTARG" ;;  # -m model files dir
+        a) all_models=1 ;;         # -a pack all models
         *) echo "Usage: $0 -e edition -v version"; exit 1 ;;
     esac
 done
@@ -18,17 +19,16 @@ if [ -z "$edition" ] || [ -z "$version" ]; then
     exit 1
 fi
 if [ "$edition" == "enterprise" ]; then
-    productName="TDengine-enterprise-TDgpt"
+    productName="tdengine-tdgpt-enterprise"
 fi
 
 if [ "$edition" == "community" ]; then
-    productName="TDengine-TDgpt"
+    productName="tdengine-tdgpt-oss"
 fi
 
 echo start to build release package, edition: ${edition}, version: ${version}
 
 curr_dir=$(pwd)
-compile_dir=$1
 
 script_dir="$(dirname $(readlink -f $0))"
 top_dir="$(readlink -f ${script_dir}/..)"
@@ -36,14 +36,13 @@ top_dir="$(readlink -f ${script_dir}/..)"
 echo -e ${top_dir}
 
 serverName="taosanoded"
-configFile="taosanode.ini"
+configFile="taosanode.config.py"
 tarName="package.tar.gz"
+initFile="__init__.py"
 
 # create compressed install file.
-build_dir="${compile_dir}/build"
 release_dir="${top_dir}/release"
 
-#package_name='linux'
 install_dir="${release_dir}/${productName}-${version}"
 
 cfg_dir="${top_dir}/cfg"
@@ -72,11 +71,23 @@ TARGET_PATTERN="__pycache__"
 find "${top_dir}/taosanalytics/" -type d -name "$TARGET_PATTERN" -exec rm -rf {} +
 
 # script to control start/stop/uninstall process
-
-
 cp -r ${top_dir}/taosanalytics/ ${lib_install_dir}/ && chmod a+x ${lib_install_dir}/ || :
-cp -r ${top_dir}/script/st*.sh ${install_dir}/bin/ && chmod a+x ${install_dir}/bin/* || :
-cp -r ${top_dir}/script/uninstall.sh ${install_dir}/bin/ && chmod a+x ${install_dir}/bin/* || :
+cp ${top_dir}/script/ini_utils.sh ${install_dir}/bin/ && chmod a+x ${install_dir}/bin/* || :
+cp ${top_dir}/script/st*.sh ${install_dir}/bin/ && chmod a+x ${install_dir}/bin/* || :
+cp ${top_dir}/script/taosanode_service.py ${install_dir}/bin/ || :
+chmod a+x ${install_dir}/bin/taosanode_service.py || :
+cp ${top_dir}/script/uninstall.sh ${install_dir}/bin/ && chmod a+x ${install_dir}/bin/* || :
+# copy all requirements*.txt files (e.g., requirements.txt, requirements_ess.txt, requirements_docker.txt)
+cp -r ${top_dir}/requirements*.txt ${install_dir}/ || :
+
+# check if the __init__ file exists
+if [ ! -f "${lib_install_dir}/taosanalytics/$initFile" ]; then
+  echo "Error: $initFile not found, failed set the version. Please check the existance of __init__.py" >&2; exit 1
+else
+  # replace the version number
+  sed -i "s/^__version__ = .*/__version__ = '${version}'/" "${lib_install_dir}/taosanalytics/$initFile"
+  echo "Version updated to ${version} in $initFile"
+fi
 
 # copy model files
 model_dir=${model_dir:-""}
@@ -88,10 +99,18 @@ if [ -d "${model_dir}" ]; then
   echo "copy ${td_model_name} model files"
   cp -r ${model_dir}/${td_model_name}.tar.gz ${model_install_dir} || :
   echo "copy ${td_model_name} model files done"
-  xhs_model_name="timer-moe"
+  xhs_model_name="timemoe"
   echo "copy ${xhs_model_name} model files "
   cp -r ${model_dir}/${xhs_model_name}.tar.gz ${model_install_dir}|| :
   echo "copy ${xhs_model_name} model files done"
+
+  if [ "$all_models" == "1" ]; then
+    for extra_model in chronos moment-large moirai timesfm; do
+      echo "copy ${extra_model} model files"
+      cp -r ${model_dir}/${extra_model}.tar.gz ${model_install_dir} || :
+      echo "copy ${extra_model} model files done"
+    done
+  fi
 fi
 
 # tar lib and model files
@@ -117,7 +136,7 @@ chmod a+x ${install_dir}/install.sh
 # exit 1
 cd ${release_dir}
 
-platform=`uname`
+platform=$(uname | tr '[:upper:]' '[:lower:]')
 if uname -m | grep -q "x86_64"; then
     arch=x64
 elif uname -m | grep -q "arm64\|aarch64"; then

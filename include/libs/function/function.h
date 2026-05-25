@@ -24,6 +24,7 @@ extern "C" {
 #include "tcommon.h"
 #include "tsimplehash.h"
 #include "tvariant.h"
+#include "nodes.h"
 
 struct SqlFunctionCtx;
 struct SResultRowEntryInfo;
@@ -36,6 +37,21 @@ typedef struct SStreamState SStreamState;
 typedef struct SFuncExecEnv {
   int32_t calcMemSize;
 } SFuncExecEnv;
+
+
+
+typedef struct SExprBasicInfo {
+  SResSchema   resSchema;
+  int16_t      numOfParams;  // argument value of each function
+  SFunctParam* pParam;
+  SNodeList*   pParamList;   // no need to free
+} SExprBasicInfo;
+
+typedef struct SExprInfo {
+  struct SExprBasicInfo base;
+  struct tExprNode*     pExpr;
+} SExprInfo;
+
 
 typedef bool (*FExecGetEnv)(struct SFunctionNode *pFunc, SFuncExecEnv *pEnv);
 typedef void (*FExecCleanUp)(struct SqlFunctionCtx *pCtx);
@@ -269,8 +285,10 @@ typedef struct SqlFunctionCtx {
   SFuncInputRowIter    rowIter;
   bool                 bInputFinished;
   bool                 hasWindowOrGroup;  // denote that the function is used with time window or group
+  bool                 hasWindow;         // denote that the function is used with time window
   bool                 needCleanup;       // denote that the function need to be cleaned up
   int32_t              inputType; // save the fuction input type funcs like finalize
+  bool                 skipDynDataCheck;
 } SqlFunctionCtx;
 
 typedef struct tExprNode {
@@ -292,20 +310,50 @@ typedef struct tExprNode {
   int32_t relatedTo;
 } tExprNode;
 
-struct SScalarParam {
-  bool             colAlloced;
-  SColumnInfoData *columnData;
+typedef struct SHashParam {
+  bool             hasHashParam;
+  bool             hasValue;
+  bool             hasNull;
+  bool             hasNotNull;
+  bool             isNegativeOp;
   SHashObj        *pHashFilter;
   SHashObj        *pHashFilterOthers;
   int32_t          filterValueType;
+  STypeMod         filterValueTypeMod;
+} SHashParam;
+
+typedef struct SRemoteParam {
+  bool   hasRemoteParam;
+  bool   hasValue;
+  bool   hasNull;
+  bool   isMinVal;
+} SRemoteParam;
+
+struct SScalarParam {
+  bool             colAlloced;
+  SColumnInfoData *columnData;
+  SHashParam       hashParam;
+  SRemoteParam     remoteParam;
   void            *param;  // other parameter, such as meta handle from vnode, to extract table name/tag value
   int32_t          numOfRows;
   int32_t          numOfQualified;  // number of qualified elements in the final results
   timezone_t       tz;
   void            *charsetCxt;
   SArray          *pFilterArr; // for types that can't filter with hash
-  STypeMod         filterValueTypeMod;
 };
+
+typedef struct SSclCompareCtx {
+  SScalarParam *pLeft;
+  SScalarParam *pLeftVar;
+  SScalarParam *pRight;
+  SScalarParam *pOut;
+  int32_t       startIndex;
+  int32_t       endIndex;
+  __compar_fn_t fp;
+  int32_t       optr;
+  int32_t      *qualifiedNum;
+  bool          isAny;
+} SSclCompareCtx;
 
 static inline void setTzCharset(SScalarParam *param, timezone_t tz, void *charsetCxt) {
   if (param == NULL) return;

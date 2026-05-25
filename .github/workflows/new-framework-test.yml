@@ -1,18 +1,33 @@
 name: New Framework Test
 
 on:
-  pull_request:
-    branches:
-      - 'main'
-    paths:
-      - 'test/cases/**'
+  workflow_dispatch:
+    inputs:
+      specified_source_branch:
+        description: 'Enter the source branch name of TDengine'
+        required: true
+        type: string
+      specified_target_branch:
+        description: 'Enter the target branch name of TDengine'
+        required: true
+        type: string
+      specified_pr_number:
+        description: 'Enter the PR number of TDengine'
+        required: true
+        type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-TDengineNewFramework
+  group: ${{ github.workflow }}-${{ github.event_name }}-
+    ${{ inputs.specified_target_branch }}-
+    ${{ inputs.specified_pr_number }}-TDengineNewFramework
   cancel-in-progress: true
 
 jobs:
   test-new-cases:
+    if: github.event_name == 'workflow_dispatch'
     uses: taosdata/.github/.github/workflows/new-framework-test.yml@main
     with:
       tdinternal: false
+      specified_source_branch: ${{ inputs.specified_source_branch }}
+      specified_target_branch: ${{ inputs.specified_target_branch }}
+      specified_pr_number: ${{ inputs.specified_pr_number }}

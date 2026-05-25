@@ -16,10 +16,10 @@
 #ifndef _TD_UTIL_UTIL_H_
 #define _TD_UTIL_UTIL_H_
 
-#include "tcrc32c.h"
 #include "tdef.h"
 #include "thash.h"
 #include "tmd5.h"
+#include "tsha.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,6 +53,7 @@ void *tmemmem(const char *haystack, int hlen, const char *needle, int nlen);
 int32_t parseCfgReal(const char *str, float *out);
 bool    tIsValidFileName(const char *fileName, const char *pattern);
 bool    tIsValidFilePath(const char *filePath, const char *pattern);
+void    tTrimMountPrefix(char *fullName);
 
 #ifdef TD_ASTRA
 static FORCE_INLINE int32_t taosStrcasecmp(const char *s1, const char *s2) {
@@ -200,29 +201,97 @@ static FORCE_INLINE void taosEncryptPass_c(uint8_t *inBuf, size_t len, char *tar
   char buf[TSDB_PASSWORD_LEN + 1];
 
   buf[TSDB_PASSWORD_LEN] = 0;
-  (void)sprintf(buf, "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x", context.digest[0],
-                context.digest[1], context.digest[2], context.digest[3], context.digest[4], context.digest[5],
-                context.digest[6], context.digest[7], context.digest[8], context.digest[9], context.digest[10],
-                context.digest[11], context.digest[12], context.digest[13], context.digest[14], context.digest[15]);
+  (void)tsnprintf(buf, sizeof(buf), "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                  context.digest[0], context.digest[1], context.digest[2], context.digest[3], context.digest[4],
+                  context.digest[5], context.digest[6], context.digest[7], context.digest[8], context.digest[9],
+                  context.digest[10], context.digest[11], context.digest[12], context.digest[13], context.digest[14],
+                  context.digest[15]);
   (void)memcpy(target, buf, TSDB_PASSWORD_LEN);
 }
 
-static FORCE_INLINE int32_t taosHashBinary(char *pBuf, int32_t len) {
+static FORCE_INLINE int32_t taosHashBinary(char *pBuf, int32_t len, int32_t cap) {
   uint64_t hashVal = MurmurHash3_64(pBuf, len);
-  return sprintf(pBuf, "%" PRIu64, hashVal);
+  return snprintf(pBuf, cap, "%" PRIu64, hashVal);
 }
 
-static FORCE_INLINE int32_t taosCreateMD5Hash(char *pBuf, int32_t len) {
+static FORCE_INLINE int32_t taosCreateMD5Hash(char *pBuf, int32_t len, int32_t cap) {
   T_MD5_CTX ctx;
+
   tMD5Init(&ctx);
   tMD5Update(&ctx, (uint8_t *)pBuf, len);
   tMD5Final(&ctx);
-  char   *p = pBuf;
-  int32_t resLen = 0;
-  return sprintf(pBuf, "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x", ctx.digest[0], ctx.digest[1],
-                 ctx.digest[2], ctx.digest[3], ctx.digest[4], ctx.digest[5], ctx.digest[6], ctx.digest[7],
-                 ctx.digest[8], ctx.digest[9], ctx.digest[10], ctx.digest[11], ctx.digest[12], ctx.digest[13],
-                 ctx.digest[14], ctx.digest[15]);
+
+  return tsnprintf(pBuf, cap, "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x", ctx.digest[0],
+                   ctx.digest[1], ctx.digest[2], ctx.digest[3], ctx.digest[4], ctx.digest[5], ctx.digest[6],
+                   ctx.digest[7], ctx.digest[8], ctx.digest[9], ctx.digest[10], ctx.digest[11], ctx.digest[12],
+                   ctx.digest[13], ctx.digest[14], ctx.digest[15]);
+}
+
+static FORCE_INLINE int32_t taosCreateSHA1Hash(char *pBuf, int32_t len, int32_t cap) {
+  uint8_t result[21] = {0};
+
+  tSHA1((char *)result, pBuf, len);
+
+  return tsnprintf(pBuf, cap, "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+                   result[0], result[1], result[2], result[3], result[4], result[5], result[6], result[7], result[8],
+                   result[9], result[10], result[11], result[12], result[13], result[14], result[15], result[16],
+                   result[17], result[18], result[19]);
+}
+
+static FORCE_INLINE int32_t taosCreateSHA2Hash(char *pBuf, int32_t len, uint32_t digestSize, int32_t cap) {
+  uint8_t result[2 * SHA512_DIGEST_SIZE + 1] = {0};
+
+  switch (digestSize / 8) {
+    case SHA224_DIGEST_SIZE:
+      sha224((const uint8_t *)pBuf, len, result);
+      return tsnprintf(
+          pBuf, cap,
+          "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%"
+          "02x%02x%02x%02x",
+          result[0], result[1], result[2], result[3], result[4], result[5], result[6], result[7], result[8], result[9],
+          result[10], result[11], result[12], result[13], result[14], result[15], result[16], result[17], result[18],
+          result[19], result[20], result[21], result[22], result[23], result[24], result[25], result[26], result[27]);
+    case SHA256_DIGEST_SIZE:
+      sha256((const uint8_t *)pBuf, len, result);
+      return tsnprintf(
+          pBuf, cap,
+          "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%"
+          "02x%02x%02x%02x%02x%02x%02x%02x",
+          result[0], result[1], result[2], result[3], result[4], result[5], result[6], result[7], result[8], result[9],
+          result[10], result[11], result[12], result[13], result[14], result[15], result[16], result[17], result[18],
+          result[19], result[20], result[21], result[22], result[23], result[24], result[25], result[26], result[27],
+          result[28], result[29], result[30], result[31]);
+    case SHA384_DIGEST_SIZE:
+      sha384((const uint8_t *)pBuf, len, result);
+      return tsnprintf(
+          pBuf, cap,
+          "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%"
+          "02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+          result[0], result[1], result[2], result[3], result[4], result[5], result[6], result[7], result[8], result[9],
+          result[10], result[11], result[12], result[13], result[14], result[15], result[16], result[17], result[18],
+          result[19], result[20], result[21], result[22], result[23], result[24], result[25], result[26], result[27],
+          result[28], result[29], result[30], result[31], result[32], result[33], result[34], result[35], result[36],
+          result[37], result[38], result[39], result[40], result[41], result[42], result[43], result[44], result[45],
+          result[46], result[47]);
+    case SHA512_DIGEST_SIZE:
+      sha512((const uint8_t *)pBuf, len, result);
+      return tsnprintf(
+          pBuf, cap,
+          "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%"
+          "02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%"
+          "02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+          result[0], result[1], result[2], result[3], result[4], result[5], result[6], result[7], result[8], result[9],
+          result[10], result[11], result[12], result[13], result[14], result[15], result[16], result[17], result[18],
+          result[19], result[20], result[21], result[22], result[23], result[24], result[25], result[26], result[27],
+          result[28], result[29], result[30], result[31], result[32], result[33], result[34], result[35], result[36],
+          result[37], result[38], result[39], result[40], result[41], result[42], result[43], result[44], result[45],
+          result[46], result[47], result[48], result[49], result[50], result[51], result[52], result[53], result[54],
+          result[55], result[56], result[57], result[58], result[59], result[60], result[61], result[62], result[63]);
+    default:
+      break;
+  }
+
+  return 0;
 }
 
 static FORCE_INLINE int32_t taosGetTbHashVal(const char *tbname, int32_t tblen, int32_t method, int32_t prefix,
@@ -233,15 +302,30 @@ static FORCE_INLINE int32_t taosGetTbHashVal(const char *tbname, int32_t tblen, 
   } else if (prefix > 0 || suffix > 0) {
     return MurmurHash3_32(tbname + prefix, tblen - prefix - suffix);
   } else {
-    char    tbName[TSDB_TABLE_FNAME_LEN];
+    char    tbName[TSDB_TABLE_FNAME_LEN] = {0};
     int32_t offset = 0;
+    int32_t avail = sizeof(tbName);
+
     if (prefix < 0) {
-      offset = -1 * prefix;
-      (void)strncpy(tbName, tbname, offset);
+      int32_t want = -prefix;
+      /* reserve 1 byte for terminating NUL when using tstrncpy */
+      int32_t n = (want < avail - 1) ? want : (avail - 1);
+      if (n > 0) {
+        tstrncpy(tbName, tbname, n + 1);
+        offset = n;
+        avail -= offset;
+      } else {
+        memcpy(tbName, tbname, avail - 1);
+      }
     }
-    if (suffix < 0) {
-      (void)strncpy(tbName + offset, tbname + tblen + suffix, -1 * suffix);
-      offset += -1 * suffix;
+
+    if (suffix < 0 && avail > 0) {
+      int32_t want = -suffix;
+      int32_t n = (want < avail - 1) ? want : (avail - 1);
+      if (n > 0) {
+        tstrncpy(tbName + offset, tbname + tblen + suffix, n + 1);
+        offset += n;
+      }
     }
     return MurmurHash3_32(tbName, offset);
   }
@@ -300,7 +384,7 @@ static FORCE_INLINE int32_t taosGetTbHashVal(const char *tbname, int32_t tblen, 
 
 #define VND_CHECK_CODE(CODE, LINO, LABEL) TSDB_CHECK_CODE(CODE, LINO, LABEL)
 
-#define TCONTAINER_OF(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
+#define TCONTAINER_OF(ptr, type, member) ((type *)((char *)(ptr)-offsetof(type, member)))
 
 #define TAOS_GET_TERRNO(code) (terrno == 0 ? code : terrno)
 
@@ -326,13 +410,14 @@ static FORCE_INLINE int32_t taosGetTbHashVal(const char *tbname, int32_t tblen, 
     }                                                 \
   } while (0)
 
-#define TAOS_CHECK_RETURN_WITH_RELEASE(CMD, PTR1, PTR2) \
-  do {                                                  \
-    int32_t __c = (CMD);                                \
-    if (__c != TSDB_CODE_SUCCESS) {                     \
-      sdbRelease(PTR1, PTR2);                           \
-      TAOS_RETURN(__c);                                 \
-    }                                                   \
+#define TAOS_CHECK_RETURN_WITH_RELEASE(CMD, PTR1, PTR2)     \
+  do {                                                      \
+    int32_t __c = (CMD);                                    \
+    if (__c != TSDB_CODE_SUCCESS) {                         \
+      sdbRelease(PTR1, PTR2);                               \
+      if (pShow->pIter) sdbCancelFetch(pSdb, pShow->pIter); \
+      TAOS_RETURN(__c);                                     \
+    }                                                       \
   } while (0)
 
 #define TAOS_CHECK_RETURN_WITH_FREE(CMD, PTR) \
@@ -380,6 +465,13 @@ bool taosIsBigChar(char c);
 bool taosIsSmallChar(char c);
 bool taosIsNumberChar(char c);
 bool taosIsSpecialChar(char c);
+// check if the string is a complex string, a complex string contains
+// at least 3 types of characters: upper, lower, digit, special
+bool taosIsComplexString(const char *str);
+
+#define QUERY_ENABLE_EXPLAIN(pTaskInfo) (pTaskInfo->enableExplain)
+#define QUERY_GET_ANALYZE_TIMESTAMP(pTaskInfo) \
+        (QUERY_ENABLE_EXPLAIN(pTaskInfo) ? taosGetTimestampUs() : TSKEY_INITIAL_VAL)
 
 #ifdef __cplusplus
 }

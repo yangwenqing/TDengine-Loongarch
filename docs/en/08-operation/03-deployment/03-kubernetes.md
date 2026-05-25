@@ -1,11 +1,8 @@
 ---
 title: Kubernetes Deployment
-slug: /operations-and-maintenance/deploy-your-cluster/kubernetes-deployment
 ---
 
 You can use kubectl or Helm to deploy TDengine in Kubernetes.
-
-Note that Helm is only supported in TDengine Enterprise. To deploy TDengine OSS in Kubernetes, use kubectl.
 
 ## Deploy TDengine with kubectl
 
@@ -14,7 +11,7 @@ To meet the requirements of high availability, the cluster needs to meet the fol
 
 - 3 or more dnodes: Multiple vnodes in the same vgroup of TDengine should not be distributed on the same dnode, so if creating a database with 3 replicas, the number of dnodes should be 3 or more.
 - 3 mnodes: mnodes are responsible for managing the entire cluster, with TDengine defaulting to one mnode. If the dnode hosting this mnode goes offline, the entire cluster becomes unavailable.
-- 3 replicas of the database: TDengine's replica configuration is at the database level, so 3 replicas can ensure that the cluster remains operational even if any one of the 3 dnodes goes offline. If 2 dnodes go offline, the cluster becomes unavailable because RAFT cannot complete the election. (Enterprise edition: In disaster recovery scenarios, if the data files of any node are damaged, recovery can be achieved by restarting the dnode.)
+- 3 replicas of the database: TDengine's replica configuration is at the database level, so 3 replicas can ensure that the cluster remains operational even if any one of the 3 dnodes goes offline. If 2 dnodes go offline, the cluster becomes unavailable because RAFT cannot complete the election. (TSDB-Enterprise: In disaster recovery scenarios, if the data files of any node are damaged, recovery can be achieved by restarting the dnode.)
 
 ### Prerequisites
 
@@ -53,6 +50,12 @@ spec:
 According to Kubernetes' descriptions of various deployment types, we will use StatefulSet as the deployment resource type for TDengine. Create the file tdengine.yaml, where replicas define the number of cluster nodes as 3. The node timezone is set to China (Asia/Shanghai), and each node is allocated 5G of standard storage, which you can modify according to actual conditions.
 
 Please pay special attention to the configuration of startupProbe. After a dnode's Pod goes offline for a period of time and then restarts, the newly online dnode will be temporarily unavailable. If the startupProbe configuration is too small, Kubernetes will consider the Pod to be in an abnormal state and attempt to restart the Pod. This dnode's Pod will frequently restart and never return to a normal state.
+
+In the following example, `taos-check startup` is used for startupProbe to verify that TDengine has completed startup, while `taos-check service` is used for readinessProbe and livenessProbe to verify that the SQL service is externally available.
+
+- `taos-check startup` and `taos-check service` are available in `3.4.1.0` and later.
+- `taos-check service` uses `TAOS_ROOT_PASSWORD_FILE` or `TAOS_ROOT_PASSWORD` for authentication, so if the root password is changed, the corresponding environment variable or Secret must be updated before the container is restarted, the image is upgraded, or the Pod is recreated.
+- For Docker-specific password and upgrade behavior across versions, see [Docker deployment](02-docker.md#custom-passwords-upgrades-and-health-checks).
 
 ```yaml
 ---
@@ -133,18 +136,21 @@ spec:
             exec:
               command:
                 - taos-check
+                - startup
             failureThreshold: 360
             periodSeconds: 10
           readinessProbe:
             exec:
               command:
                 - taos-check
+                - service
             initialDelaySeconds: 5
             timeoutSeconds: 5000
           livenessProbe:
             exec:
               command:
                 - taos-check
+                - service
             initialDelaySeconds: 15
             periodSeconds: 20
   volumeClaimTemplates:
@@ -468,7 +474,7 @@ Follow the instructions to check the status of the TDengine cluster:
 
 ```shell
 root@u1-58:/data1/projects/helm# kubectl --namespace default exec $POD_NAME -- taos -s "show dnodes; show mnodes"
-Welcome to the TDengine Command Line Interface, Client Version:3.3.5.8
+Welcome to the TDengine TSDB Command Line Interface, Client Version:3.3.5.8
 Copyright (c) 2023 by TDengine, all rights reserved.
 
 taos> show dnodes; show mnodes
@@ -717,7 +723,7 @@ Follow the instructions to check the status of the TDengine cluster:
 
 ```shell
 root@u1-58:/data1/projects/helm# kubectl --namespace default exec $POD_NAME -- taos -s "show dnodes; show mnodes"
-Welcome to the TDengine Command Line Interface, Client Version:3.3.5.1
+Welcome to the TDengine TSDB Command Line Interface, Client Version:3.3.5.1
 Copyright (c) 2023 by TDengine, all rights reserved.
 
 taos> show dnodes; show mnodes

@@ -1,14 +1,7 @@
 ---
 sidebar_label: Data Querying
 title: Data Querying
-slug: /basic-features/data-querying
 ---
-
-import Image from '@theme/IdealImage';
-import windowModel from '../assets/data-querying-01-window.png';
-import slidingWindow from '../assets/data-querying-02-time-window.webp';
-import sessionWindow from '../assets/data-querying-03-session-window.png';
-import eventWindow from '../assets/data-querying-04-event-window.png';
 
 Compared to many other time-series and real-time databases, a unique advantage of TDengine since its first release is its support for standard SQL queries. This feature significantly reduces the learning curve for users. This chapter will use the data model of smart meters as an example to demonstrate how to use SQL queries in TDengine to handle time-series data. For further details and features of SQL syntax, it is recommended to refer to the official TDengine documentation. By studying this chapter, you will be able to master TDengine's SQL querying techniques and efficiently operate and analyze time-series data.
 
@@ -49,9 +42,9 @@ Query OK, 5 row(s) in set (0.145403s)
 TDengine supports aggregate queries through the GROUP BY clause. When an SQL statement includes a GROUP BY clause, the SELECT list can only contain the following expressions:
 
 1. Constants
-2. Aggregate functions
-3. Expressions identical to those after GROUP BY
-4. Expressions containing the above expressions
+1. Aggregate functions
+1. Expressions identical to those after GROUP BY
+1. Expressions containing the above expressions
 
 The GROUP BY clause is used to group data and return a summary row for each group. In the GROUP BY clause, any column from tables or views can be used as the basis for grouping, and these columns do not need to appear in the select list. Additionally, users can directly perform aggregate queries on supertables without the need to create subtables beforehand. Taking the data model of smart meters as an example, the SQL using the GROUP BY clause is as follows:
 
@@ -81,7 +74,11 @@ The SQL above queries the supertable `meters` for data where the timestamp is gr
 Query OK, 10 row(s) in set (0.042446s)
 ```
 
-**Note**: The group by clause does not guarantee that the results are ordered in a specific sequence when aggregating data. To obtain an ordered result set, you can use the order by clause to sort the results. This allows you to adjust the order of the output results as needed to meet specific business requirements or reporting needs.
+:::note
+
+The group by clause does not guarantee that the results are ordered in a specific sequence when aggregating data. To obtain an ordered result set, you can use the order by clause to sort the results. This allows you to adjust the order of the output results as needed to meet specific business requirements or reporting needs.
+
+:::
 
 TDengine provides a variety of built-in aggregation functions. The table below shows:
 
@@ -112,8 +109,8 @@ PARTITION BY part_list
 TDengine processes the data partitioning clause as follows:
 
 1. The data partitioning clause is placed after the WHERE clause;
-2. The data partitioning clause divides the table data by the specified dimensions, and each partitioned shard undergoes specified calculations. The calculations are defined by subsequent clauses (window clause, GROUP BY clause, or SELECT clause);
-3. The data partitioning clause can be used together with a window partitioning clause (or GROUP BY clause), in which case the subsequent clauses apply to each partitioned shard.
+1. The data partitioning clause divides the table data by the specified dimensions, and each partitioned shard undergoes specified calculations. The calculations are defined by subsequent clauses (window clause, GROUP BY clause, or SELECT clause);
+1. The data partitioning clause can be used together with a window partitioning clause (or GROUP BY clause), in which case the subsequent clauses apply to each partitioned shard.
 
 The SQL for data partitioning is as follows:
 
@@ -147,37 +144,41 @@ In TDengine, you can use the window clause to perform aggregation queries by tim
 
 The window clause allows you to partition the queried data set by windows and aggregate the data within each window. The logic of window partitioning is shown in the following image:
 
-<figure>
-<Image img={windowModel} alt="Windowing description"/>
-<figcaption>Figure 1. Windowing logic</figcaption>
-</figure>
+![Windowing logic](../assets/data-querying-01-window.png)
 
 - Time Window: Data is divided based on time intervals, supporting sliding and tumbling time windows, suitable for data aggregation over fixed time periods.
-- Status Window: Windows are divided based on changes in device status values, with data of the same status value grouped into one window, which closes when the status value changes.
+- State Window: Windows are divided based on changes in device status values, with data of the same status value grouped into one window, which closes when the status value changes.
 - Session Window: Sessions are divided based on the differences in record timestamps, with records having a timestamp interval less than the predefined value belonging to the same session.
 - Event Window: Windows are dynamically divided based on the start and end conditions of events, opening when the start condition is met and closing when the end condition is met.
 - Count Window: Windows are divided based on the number of data rows, with each window consisting of a specified number of rows for aggregation calculations.
+- External Window: The time range of the window is explicitly defined by a subquery, which is suitable for complex analysis such as cross-event correlation, window reuse, and layered filtering.
 
 The syntax for the window clause is as follows:
 
 ```sql
 window_clause: {
     SESSION(ts_col, tol_val)
-  | STATE_WINDOW(col)
-  | INTERVAL(interval_val [, interval_offset]) [SLIDING (sliding_val)] [FILL(fill_mod_and_val)]
-  | EVENT_WINDOW START WITH start_trigger_condition END WITH end_trigger_condition
+  | STATE_WINDOW(expr [, extend[, zeroth_state]]) [TRUE_FOR(true_for_expr)]
+  | INTERVAL(interval_val [, interval_offset]) [SLIDING (sliding_val)] [fill_clause]
+  | EVENT_WINDOW START WITH start_trigger_condition END WITH end_trigger_condition [TRUE_FOR(true_for_expr)]
+    | COUNT_WINDOW(count_val[, sliding_val])
+    | EXTERNAL_WINDOW ((subquery) window_alias)
 }
 ```
 
-**Note** When using the window clause, the following rules should be observed:
+:::note
+
+When using the window clause, the following rules should be observed. These rules apply to the five window types SESSION, STATE_WINDOW, INTERVAL, EVENT_WINDOW, and COUNT_WINDOW. EXTERNAL_WINDOW has different rules; see the [External Window](#external-window) section for details.
 
 1. The window clause is located after the data partitioning clause and cannot be used together with the GROUP BY clause.
-2. The window clause partitions the data by windows and performs calculations on the expressions in the SELECT list for each window. The expressions in the SELECT list can only include: constants; pseudocolumns: _wstart pseudo-column,_wend pseudo-column, and _wduration pseudo-column; aggregate functions (including selection functions and time-series specific functions that can determine the number of output rows by parameters)
-3. WHERE statements can specify the start and end times of the query and other filtering conditions.
+1. The window clause partitions the data by windows and performs calculations on the expressions in the SELECT list for each window. The expressions in the SELECT list can only include: constants; pseudocolumns: \_wstart pseudo-column,\_wend pseudo-column, and \_wduration pseudo-column; aggregate functions (including selection functions and time-series specific functions that can determine the number of output rows by parameters)
+1. WHERE statements can specify the start and end times of the query and other filtering conditions.
+
+:::
 
 ### Timestamp Pseudocolumns
 
-In the window aggregation query results, if the SQL does not specify the timestamp column in the output query results, the final results will not automatically include the time column information of the window. However, if you need to output the time window information corresponding to the aggregated query results in the results, you can use the timestamp-related pseudocolumns in the select clause, such as the start time of the time window (`_wstart`), the end time of the time window (`_wend`), the duration of the time window (`_wduration`), and the pseudocolumns related to the overall query window, such as the start time of the query window (`_qstart`) and the end time of the query window (`_qend`). Note that both the start and end times of the time window are closed intervals, and the duration of the time window is the value under the current time resolution of the data. For example, if the current database's time precision is milliseconds (ms), then 500 in the results represents the duration of the current time window is 500ms.
+In the window aggregation query results, if the SQL does not specify the timestamp column in the output query results, the final results will not automatically include the time column information of the window. However, if you need to output the time window information corresponding to the aggregated query results in the results, you can use the timestamp-related pseudocolumns in the select clause, such as the start time of the time window (`_wstart`), the end time of the time window (`_wend`), the duration of the time window (`_wduration`), and the pseudocolumns related to the overall query window, such as the start time of the query window (`_qstart`) and the end time of the query window (`_qend`). It should be noted that, except that the end time of the INTERVAL window is an open interval, the start time and end time of other time windows are both closed intervals, and the duration of the time window is the value under the current time resolution of the data. For example, if the current database's time precision is milliseconds (ms), then 500 in the results represents the duration of the current time window is 500ms.
 
 ### Time Windows
 
@@ -186,7 +187,7 @@ Time windows can be divided into: sliding time windows and tumbling time windows
 ```sql
 INTERVAL(interval_val [, interval_offset]) 
 [SLIDING (sliding_val)] 
-[FILL(fill_mod_and_val)]
+[fill_clause]
 ```
 
 The time window clause includes 3 sub-clauses:
@@ -198,8 +199,8 @@ The time window clause includes 3 sub-clauses:
 For time windows, both interval_val and sliding_val represent time periods, and syntactically support three ways. For example:
 
 1. INTERVAL(1s, 500a) SLIDING(1s), with time units, where the time units are represented by single characters, respectively: a (milliseconds), b (nanoseconds), d (days), h (hours), m (minutes), n (months), s (seconds), u (microseconds), w (weeks), y (years);
-2. INTERVAL(1000, 500) SLIDING(1000), without time units, will use the time precision of the query database as the default time unit, and when there are multiple databases, the one with higher precision will be used by default;
-3. INTERVAL('1s', '500a') SLIDING('1s'), with time units in string form, where the string cannot contain any spaces or other characters.
+1. INTERVAL(1000, 500) SLIDING(1000), without time units, will use the time precision of the query database as the default time unit, and when there are multiple databases, the one with higher precision will be used by default;
+1. INTERVAL('1s', '500a') SLIDING('1s'), with time units in string form, where the string cannot contain any spaces or other characters.
 
 Example SQL is as follows:
 
@@ -237,12 +238,9 @@ Query OK, 12 row(s) in set (0.021265s)
 
 Each query execution is a time window, and the time window slides forward as time progresses. When defining a continuous query, it is necessary to specify the size of the time window (time window) and the forward increment time (forward sliding times). As shown in the figure below, [t0s, t0e], [t1s, t1e], [t2s, t2e] are the time window ranges for three consecutive queries, and the time range of the window's forward sliding is indicated by sliding time. Query filtering, aggregation, and other operations are performed independently for each time window.
 
-<figure>
-<Image img={slidingWindow} alt="Sliding window logic"/>
-<figcaption>Figure 2. Sliding window logic</figcaption>
-</figure>
+![Sliding window logic](../assets/data-querying-02-time-window.png)
 
-**Note**
+:::note
 
 1. INTERVAL and SLIDING clauses need to be used in conjunction with aggregation and selection functions, therefore, the following SQL statement is illegal:
 
@@ -250,17 +248,19 @@ Each query execution is a time window, and the time window slides forward as tim
 SELECT COUNT(*) FROM temp_tb_1 INTERVAL(1m) SLIDING(2m);
 ```
 
-2. The forward sliding time of SLIDING cannot exceed the time range of a window, therefore, the following SQL statement is also illegal:
+1. The forward sliding time of SLIDING cannot exceed the time range of a window, therefore, the following SQL statement is also illegal:
 
 ```sql
 SELECT COUNT(*) FROM temp_tb_1 INTERVAL(1m) SLIDING(2m);
 ```
 
-**Points to note when using time windows**
+:::
+
+Points to note when using time windows:
 
 1. The window width of the aggregation period is specified by the keyword INTERVAL, with a minimum interval of 10 milliseconds (10a); it also supports an offset (offset must be less than the interval), which is the offset of the time window division compared to "UTC moment 0". The SLIDING statement is used to specify the forward increment of the aggregation period, i.e., the duration of each window's forward slide.
-2. When using the INTERVAL statement, unless in very special circumstances, it is required to configure the timezone parameter in the taos.cfg configuration file of both client and server to the same value, to avoid frequent cross-time zone conversions by time handling functions, which could lead to severe performance impacts.
-3. The returned results have a strictly monotonically increasing time sequence.
+1. When using the INTERVAL statement, unless in very special circumstances, it is required to configure the timezone parameter in the taos.cfg configuration file of both client and server to the same value, to avoid frequent cross-time zone conversions by time handling functions, which could lead to severe performance impacts.
+1. The returned results have a strictly monotonically increasing time sequence.
 
 Example:
 
@@ -309,7 +309,7 @@ INTERVAL(1m) SLIDING(1m)
 SLIMIT 1;
 ```
 
-The above SQL queries the supertable `meters` for data with timestamps greater than or equal to `2022-01-01T00:00:00+08:00` and less than `2022-01-01T00:05:00+08:00`. The data is first partitioned by the subtable name `tbname`, then divided into 1-minute time windows, with each time window also being 1 minute long; finally, only the data from the first partition is taken as the result. The query results are as follows:
+The above SQL queries the supertable `meters` for data with timestamps greater than or equal to `2022-01-01T00:00:00+08:00` and less than `2022-01-01T00:05:00+08:00`. The data is first partitioned by the subtable name `tbname`, then divided into 1-minute time windows, with the time windows sliding every 1 minute; finally, only the data from the first partition is taken as the result. The query results are as follows:
 
 ```text
  tbname |         _wstart         |          _wend          |     avg(voltage)      |
@@ -324,36 +324,9 @@ Query OK, 5 row(s) in set (0.016812s)
 
 #### FILL Clause
 
-The FILL clause is used to specify the fill mode when data is missing in a window interval. The fill modes include the following:
+The INTERVAL clause supports using the FILL clause to specify the data filling method when data is missing. For how to use the FILL clause, please refer to [FILL Clause](../14-reference/03-taos-sql/20-select.md#fill-clause).
 
-1. No fill: NONE (default fill mode).
-2. VALUE fill: Fixed value fill, where the fill value must be specified. For example: FILL(VALUE, 1.23). Note that the final fill value is determined by the type of the corresponding column, such as FILL(VALUE, 1.23) for an INT type column, the fill value would be 1.
-3. PREV fill: Fill with the previous non-NULL value. For example: FILL(PREV).
-4. NULL fill: Fill with NULL. For example: FILL(NULL).
-5. LINEAR fill: Perform linear interpolation based on the nearest non-NULL values before and after. For example: FILL(LINEAR).
-6. NEXT fill: Fill with the next non-NULL value. For example: FILL(NEXT).
-
-Among these fill modes, except for the NONE mode which does not fill by default, other modes will be ignored if there is no data in the entire query time range, resulting in no fill data and an empty query result. This behavior is reasonable under some modes (PREV, NEXT, LINEAR) because no data means no fill value can be generated.
-
-For other modes (NULL, VALUE), theoretically, fill values can be generated. Whether to output fill values depends on the application's requirements. To meet the needs of applications that require forced filling of data or NULL, and to maintain compatibility with existing fill modes, TDengine also supports two new fill modes:
-
-1. NULL_F: Force fill with NULL values
-2. VALUE_F: Force fill with VALUE
-
-The differences between NULL, NULL_F, VALUE, and VALUE_F for different scenarios are as follows:
-
-1. INTERVAL clause: NULL_F, VALUE_F are forced fill modes; NULL, VALUE are non-forced modes. In this mode, their semantics match their names.
-2. Stream computing's INTERVAL clause: NULL_F and NULL behave the same, both are non-forced modes; VALUE_F and VALUE behave the same, both are non-forced modes. That is, there is no forced mode in stream computing's INTERVAL.
-3. INTERP clause: NULL and NULL_F behave the same, both are forced modes; VALUE and VALUE_F behave the same, both are forced modes. That is, there is no non-forced mode in INTERP.
-
-**Note**
-
-1. Using the FILL statement may generate a large amount of filled output, be sure to specify the time range for the query.
-2. For each query, the system can return no more than 10 million results with interpolation.
-3. In time dimension aggregation, the returned results have a strictly monotonic increasing time sequence.
-4. If the query target is a supertable, the aggregate function will apply to the data of all tables under the supertable that meet the value filtering conditions. If the query does not use a PARTITION BY statement, the results are returned in a strictly monotonic increasing time sequence; if the query uses a PARTITION BY statement for grouping, the results within each PARTITION are strictly monotonic increasing in time sequence.
-
-Example:
+#### Example
 
 ```sql
 SELECT tbname, _wstart, _wend, avg(voltage)
@@ -387,6 +360,8 @@ Query OK, 10 row(s) in set (0.022866s)
 
 Use integers (boolean values) or strings to identify the state of the device when the record is generated. Records with the same state value belong to the same state window, and the window closes when the value changes. TDengine also supports using CASE expressions on state values, which can express that the start of a state is triggered by meeting a certain condition, and the end of the state is triggered by meeting another condition. For example, with smart meters, if the voltage is within the normal range of 225V to 235V, you can monitor the voltage to determine if the circuit is normal.
 
+In supertable queries, or in subqueries where tag columns are available, the state expression can also reference tag columns, as long as the final result type is still integer, boolean, or string. For example, `CASE WHEN voltage >= 220 + groupId THEN 'high' ELSE 'normal' END` is valid. However, `STATE_WINDOW(groupId)` is not supported because the tag column cannot be used directly as the state expression.
+
 ```sql
 SELECT tbname, _wstart, _wend,_wduration, CASE WHEN voltage >= 225 and voltage <= 235 THEN 1 ELSE 0 END status 
 FROM meters 
@@ -399,7 +374,7 @@ STATE_WINDOW(
 SLIMIT 2;
 ```
 
-The above SQL queries data from the supertable `meters`, where the timestamp is greater than or equal to `2022-01-01T00:00:00+08:00` and less than `2022-01-01T00:05:00+08:00`. Data is first partitioned by the subtable name `tbname`. It then divides into status windows based on whether the voltage is within the normal range. Finally, it retrieves data from the first 2 partitions as the result. The query results are as follows: (Since the data is randomly generated, the number of data entries in the result set may vary)
+The above SQL queries data from the supertable `meters`, where the timestamp is greater than or equal to `2022-01-01T00:00:00+08:00` and less than `2022-01-01T00:05:00+08:00`. Data is first partitioned by the subtable name `tbname`. It then divides into state windows based on whether the voltage is within the normal range. Finally, it retrieves data from the first 2 partitions as the result. The query results are as follows: (Since the data is randomly generated, the number of data entries in the result set may vary)
 
 ```text
  tbname |         _wstart         |          _wend          |  _wduration   |    status     |
@@ -433,10 +408,7 @@ Query OK, 22 row(s) in set (0.153403s)
 
 The session window determines whether records belong to the same session based on the value of the timestamp primary key. As shown in the figure below, if the interval between consecutive timestamps is set to be less than or equal to 12 seconds, the following 6 records form 2 session windows: [2019-04-28 14:22:10, 2019-04-28 14:22:30] and [2019-04-28 14:23:10, 2019-04-28 14:23:30]. This is because the interval between 2019-04-28 14:22:30 and 2019-04-28 14:23:10 is 40 seconds, which exceeds the continuous interval (12 seconds).
 
-<figure>
-<Image img={sessionWindow} alt="Session window example"/>
-<figcaption>Figure 3. Session window example</figcaption>
-</figure>
+![Session window example](../assets/data-querying-03-session-window.png)
 
 Within the tol_value time interval, results are considered to belong to the same window. If the time between two consecutive records exceeds tol_val, a new window is automatically started.
 
@@ -478,6 +450,8 @@ Query OK, 10 row(s) in set (0.043489s)
 
 Event windows are defined by start and end conditions. The window starts when the `start_trigger_condition` is met and closes when the `end_trigger_condition` is satisfied. Both `start_trigger_condition` and `end_trigger_condition` can be any condition expression supported by TDengine and can include different columns.
 
+In supertable queries, or in subqueries where tag columns are available, the start/end condition expressions can also reference tag columns. For example: `EVENT_WINDOW START WITH voltage >= 220 + groupId END WITH voltage < 220 + groupId`.
+
 An event window can contain only one data point. That is, when a single data point meets both the `start_trigger_condition` and `end_trigger_condition` and is not currently within a window, it alone constitutes a window.
 
 If an event window cannot be closed, it does not form a window and will not be output. That is, if data meets the `start_trigger_condition` and the window opens, but subsequent data does not meet the `end_trigger_condition`, the window cannot be closed. This data does not form a window and will not be output.
@@ -490,10 +464,7 @@ Consider the following SQL statement, the event window segmentation is illustrat
 select _wstart, _wend, count(*) from t event_window start with c1 > 0 end with c2 < 10 
 ```
 
-<figure>
-<Image img={eventWindow} alt="Event window example"/>
-<figcaption>Figure 4. Event window example</figcaption>
-</figure>
+![Event window example](../assets/data-querying-04-event-window.png)
 
 Example SQL:
 
@@ -521,7 +492,7 @@ The above SQL queries the supertable meters for data with timestamps greater tha
  d1     | 2022-01-01 00:01:40.000 | 2022-01-01 00:02:30.000 |         50000 |             6 |
  d1     | 2022-01-01 00:02:40.000 | 2022-01-01 00:03:10.000 |         30000 |             4 |
  d1     | 2022-01-01 00:03:20.000 | 2022-01-01 00:07:10.000 |        230000 |            24 |
-……
+...
 Query OK, 500 row(s) in set (0.328557s)
 ```
 
@@ -558,6 +529,74 @@ The above SQL query returns the data from the supertable meters where the timest
 Query OK, 10 row(s) in set (0.062794s)
 ```
 
+### External Window
+
+External Window is used to "define windows first, then calculate within the windows." Unlike built-in windows such as INTERVAL and EVENT_WINDOW, the time range of an external window is explicitly defined by a subquery, which is suitable for complex analysis such as cross-event correlation, window reuse, and layered filtering.
+
+**Syntax:**
+
+```sql
+SELECT ... 
+FROM table_name
+[PARTITION BY expr_list]
+EXTERNAL_WINDOW (
+    (subquery_that_defines_windows) window_alias
+)
+[HAVING condition]
+[ORDER BY ...]
+```
+
+The first two columns of the subquery must be of type timestamp, representing the window start time and window end time respectively. Columns from the third column onward become "window attribute columns", which can be referenced through `window_alias.column_name`. The outer query performs calculations independently within each window range.
+
+Example: the `grid_events` table records the start and end times of power grid events such as outages or maintenance. Use those event intervals as windows to aggregate voltage data in `meters`, and filter out events with no data in the window:
+
+```sql
+SELECT _wstart, _wend, COUNT(*), AVG(voltage)
+FROM meters
+EXTERNAL_WINDOW (
+    (SELECT start_time, end_time FROM grid_events) w
+)
+HAVING COUNT(*) > 0;
+```
+
+The query result is as follows:
+
+```text
+         _wstart         |          _wend          |   count(*)    |     avg(voltage)      |
+=============================================================================================
+ 2022-03-01 02:00:00.000 | 2022-03-01 02:35:00.000 |           210 |   231.480000000000000 |
+ 2022-06-15 14:10:00.000 | 2022-06-15 14:52:00.000 |           252 |   248.920000000000000 |
+ ...
+```
+
+In the SQL above, the window boundaries come from the independent `grid_events` table rather than being derived from `meters` itself. This is the core value of external windows: **decoupling window definition from data sources**. You can directly use the time ranges of arbitrary external events, such as alert records, schedules, or maintenance plans, for aggregation analysis without pre-partitioning the measurement data into windows.
+
+For detailed explanations of external window core features such as partition alignment, window attribute column reference rules, nested usage, and constraints, see [TDengine TSDB Distinctive Queries - External Window](../14-reference/03-taos-sql/24-distinguished.md#external-window).
+
+## Time Range Expression
+
+In queries of time series databases, it is often necessary to query based on the time range of the primary key column. TDengine provides a series of functions and expressions to facilitate users in expressing time ranges. Here, common time range expressions and their differences from MySQL and PostgreSQL are listed:
+
+| Time Range          |   MySQL Expression                                                    |  PostgreSQL Expression   |   TDengine Expression   |
+|:------------:|:--------------------------------------------------------------------:|:-----------------------------------:|:--------------------------------:|
+| Yesterday​ | CURDATE() - INTERVAL 1 DAY,<br/> CURDATE() | CURRENT_DATE - INTERVAL '1 day',<br/> CURRENT_DATE | TODAY() - 1d,<br/> TODAY() |
+| Today |​ CURDATE(),<br/> CURDATE() + INTERVAL 1 DAY | CURRENT_DATE,<br/> CURRENT_DATE + INTERVAL '1 day' | TODAY(),<br/> TODAY() + 1d |
+| Last Week | DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) + 7 DAY),<br/> DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY) | DATE_TRUNC('week', CURRENT_DATE - INTERVAL '1 week'),<br/> DATE_TRUNC('week', CURRENT_DATE) | TIMETRUNCATE(NOW(), 1d) - (7 + WEEKDAY(TO_CHAR(NOW(), 'YYYY-MM-DD'))) &ast; 24 &ast; 3600000,<br/> TIMETRUNCATE(NOW(), 1d) - WEEKDAY(TO_CHAR(NOW(), 'YYYY-MM-DD')) &ast; 24 &ast; 3600000 |
+| This Week | DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY),<br/> DATE_SUB(CURDATE(), INTERVAL WEEKDAY(CURDATE()) DAY) + INTERVAL 7 DAY | DATE_TRUNC('week', CURRENT_DATE),<br/> DATE_TRUNC('week', CURRENT_DATE + INTERVAL '1 week') | TIMETRUNCATE(NOW(), 1d) - WEEKDAY(TO_CHAR(NOW(), 'YYYY-MM-DD')) &ast; 24 &ast; 3600000,<br/> TIMETRUNCATE(NOW(), 1d) + (7 - WEEKDAY(TO_CHAR(NOW(), 'YYYY-MM-DD'))) &ast; 24 &ast; 3600000 |
+| Last Month | DATE_FORMAT(CURDATE() - INTERVAL 1 MONTH, '%Y-%m-01'),<br/> DATE_FORMAT(CURDATE(), '%Y-%m-01') | DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month'),<br/> DATE_TRUNC('month', CURRENT_DATE) |TO_TIMESTAMP(TO_CHAR(NOW() -1n, 'YYYY-MM'), 'YYYY-MM'),<br/> TO_TIMESTAMP(TO_CHAR(NOW(), 'YYYY-MM'), 'YYYY-MM') |
+| This Month | DATE_FORMAT(CURDATE(), '%Y-%m-01'),<br/> DATE_FORMAT(CURDATE() + INTERVAL 1 MONTH, '%Y-%m-01') | DATE_TRUNC('month', CURRENT_DATE),<br/> DATE_TRUNC('month', CURRENT_DATE + INTERVAL '1 month') |TO_TIMESTAMP(TO_CHAR(NOW(), 'YYYY-MM'), 'YYYY-MM'),<br/> TO_TIMESTAMP(TO_CHAR(NOW() + 1n, 'YYYY-MM'), 'YYYY-MM') |
+| Last Quarter | MAKEDATE(YEAR(CURDATE()), 1) + INTERVAL (QUARTER(CURDATE()) - 2) &ast; 3 MONTH,<br/> MAKEDATE(YEAR(CURDATE()), 1) + INTERVAL (QUARTER(CURDATE()) - 1) &ast; 3 MONTH | DATE_TRUNC('quarter', CURRENT_DATE - INTERVAL '3 months'),<br/> DATE_TRUNC('quarter', CURRENT_DATE) | TO_TIMESTAMP(CASE WHEN TO_CHAR(NOW(), 'MM') < 4 THEN CONCAT(CAST(TO_CHAR(NOW(), 'YYYY') - 1 AS VARCHAR(5)), "-", CAST(FLOOR((TO_CHAR(NOW(), 'MM') + 8) / 3) &ast; 3 + 1 AS VARCHAR(3))) ELSE CONCAT(TO_CHAR(NOW(), 'YYYY'), "-", CAST(FLOOR((TO_CHAR(NOW(), 'MM') - 4) / 3) &ast; 3 + 1 AS VARCHAR(3))) END, 'YYYY-MM'),<br/>TO_TIMESTAMP(CONCAT(TO_CHAR(NOW(), 'YYYY'), "-", CAST(FLOOR((TO_CHAR(NOW(), 'MM') - 1) / 3) &ast; 3 + 1 AS VARCHAR)), 'YYYY-MM') |
+| This Quarter | MAKEDATE(YEAR(CURDATE()), 1) + INTERVAL (QUARTER(CURDATE()) - 1) &ast; 3 MONTH,<br/> MAKEDATE(YEAR(CURDATE()), 1) + INTERVAL QUARTER(CURDATE()) &ast; 3 MONTH | DATE_TRUNC('quarter', CURRENT_DATE),<br/> DATE_TRUNC('quarter', CURRENT_DATE + INTERVAL '3 months') | TO_TIMESTAMP(CONCAT(TO_CHAR(NOW(), 'YYYY'), "-", CAST(FLOOR((TO_CHAR(NOW(), 'MM') - 1) / 3) &ast; 3 + 1 AS VARCHAR)), 'YYYY-MM'),<br/> TO_TIMESTAMP(CONCAT(CAST(TO_CHAR(NOW(), 'YYYY') + CASE WHEN TO_CHAR(NOW(), 'MM') > 9 THEN 1 ELSE 0 END AS VARCHAR), "-", CAST((FLOOR((TO_CHAR(NOW(), 'MM') + 2) / 3) &ast; 3 + 1) % 12 AS VARCHAR)), 'YYYY-MM') |
+| Last Year | MAKEDATE(YEAR(CURDATE()) - 1, 1),<br/> MAKEDATE(YEAR(CURDATE()), 1) | DATE_TRUNC('year', CURRENT_DATE - INTERVAL '1 year'),<br/> DATE_TRUNC('year', CURRENT_DATE) | TO_TIMESTAMP(TO_CHAR(NOW() - 1y, 'YYYY'), 'YYYY'),<br/> TO_TIMESTAMP(TO_CHAR(NOW(), 'YYYY'), 'YYYY') |
+| This Year | MAKEDATE(YEAR(CURDATE()), 1),<br/> MAKEDATE(YEAR(CURDATE()) + 1, 1) | DATE_TRUNC('year', CURRENT_DATE), <br/> DATE_TRUNC('year', CURRENT_DATE + INTERVAL '1 year') | TO_TIMESTAMP(TO_CHAR(NOW(), 'YYYY'), 'YYYY'),<br/> TO_TIMESTAMP(TO_CHAR(NOW() + 1y, 'YYYY'), 'YYYY') |
+
+### Description
+
+1. Each time range interval is left-closed and right-open.
+2. The writing style is not unique, and this is provided here as an example for reference only.
+3. Here, Monday is used as the start of the week, and scenarios that do not start on Monday need to be adjusted.
+4. Here, the timestamp in the TDengine example uses milliseconds as the time unit.
+
 ## Time-Series Extensions
 
 Time-series extensions are a set of functions specially designed by TDengine for time-series data query scenarios. In general databases, similar functions usually require complex query statements and are less efficient. To reduce user costs and simplify the query process, TDengine provides these functions in the form of built-in functions, thus achieving efficient and easy-to-use time series data processing capabilities. The time series specific functions are as follows.
@@ -572,6 +611,17 @@ Time-series extensions are a set of functions specially designed by TDengine for
 |STATECOUNT | Returns the number of consecutive records that meet a certain condition, appending the result as a new column at the end of each row. The condition is calculated based on the parameter, adding 1 if true, resetting to -1 if false, and skipping if the data is NULL. |
 |STATEDURATION | Returns the duration of consecutive records that meet a certain condition, appending the result as a new column at the end of each row. The condition is calculated based on the parameter, adding the time length between two records if true (the time length of the first record meeting the condition is counted as 0), resetting to -1 if false, and skipping if the data is NULL.|
 |TWA | Time Weighted Average function. Calculates the time-weighted average of a column over a period of time. |
+
+### Integral Calculation
+
+With TDengine's time-series specific functions, computing integrals over time-series data becomes straightforward: use the time-weighted average multiplied by the time window duration. For example, to calculate daily energy consumption for smart meters, use:
+
+```sql
+SELECT twa(voltage * current) * _wduration
+FROM meters
+PARTITION BY tbname
+INTERVAL(1d);
+```
 
 ## Nested Queries
 
@@ -592,17 +642,22 @@ The above SQL performs an inner query on the supertable meters, grouping by subt
 TDengine's nested queries follow these rules:
 
 1. The result of the inner query serves as a "virtual table" for the outer query to use, and it is recommended to alias this virtual table for easy reference in the outer query.
-2. The outer query supports direct referencing of columns or pseudocolumns from the inner query by column name or alias.
-3. Both inner and outer queries support regular joins between tables/supertables. The result of the inner query can also participate in joins with data subtables.
-4. The features supported by the inner query are consistent with those of non-nested queries. The ORDER BY clause in the inner query generally has no meaning and is recommended to be avoided to prevent unnecessary resource consumption.
-5. Compared to non-nested queries, the outer query has the following limitations in supported features:
-6. If the result data of the inner query does not provide timestamps, then functions implicitly dependent on timestamps will not work properly in the outer query. Examples include: INTERP, DERIVATIVE, IRATE, LAST_ROW, FIRST, LAST, TWA, STATEDURATION, TAIL, UNIQUE.
-7. If the result data of the inner query is not ordered by timestamp, then functions dependent on data being ordered by time will not work properly in the outer query. Examples include: LEASTSQUARES, ELAPSED, INTERP, DERIVATIVE, IRATE, TWA, DIFF, STATECOUNT, STATEDURATION, CSUM, MAVG, TAIL, UNIQUE.
-8. Functions that require two passes of scanning will not work properly in the outer query. Such functions include: PERCENTILE.
+1. The outer query supports direct referencing of columns or pseudocolumns from the inner query by column name or alias.
+1. Both inner and outer queries support regular joins between tables/supertables. The result of the inner query can also participate in joins with data subtables.
+1. The features supported by the inner query are consistent with those of non-nested queries. The ORDER BY clause in the inner query generally has no meaning and is recommended to be avoided to prevent unnecessary resource consumption.
+1. Compared to non-nested queries, the outer query has the following limitations in supported features:
+1. If the result data of the inner query does not provide timestamps, then functions implicitly dependent on timestamps will not work properly in the outer query. Examples include: INTERP, DERIVATIVE, IRATE, LAST_ROW, FIRST, LAST, TWA, STATEDURATION, TAIL, UNIQUE.
+1. If the result data of the inner query is not ordered by timestamp, then functions dependent on data being ordered by time will not work properly in the outer query. Examples include: LEASTSQUARES, ELAPSED, INTERP, DERIVATIVE, IRATE, TWA, DIFF, STATECOUNT, STATEDURATION, CSUM, MAVG, TAIL, UNIQUE.
+1. Functions that require two passes of scanning will not work properly in the outer query. Such functions include: PERCENTILE.
 
 ## UNION Clause
 
-TDengine supports the UNION operator. That is, if multiple SELECT clauses return result sets with the exact same structure (column names, types, number, and order), these result sets can be combined using the UNION clause.
+In TDengine, the UNION [ALL] operator is used to combine the results of multiple SELECT clauses. When using this operator, the multiple SELECT clauses must satisfy the following two conditions:
+
+1. Each SELECT clause must return results with the same number of columns;
+2. Columns in corresponding positions must be in the same order and have the same or compatible data types.
+
+After combination, the column names of the result set are determined by those defined in the first SELECT clause.
 
 Example:
 
@@ -638,7 +693,7 @@ In the same SQL statement, a maximum of 100 UNION clauses are supported.
 
 In association queries, the role of the driving table depends on the type of join used: in the Left Join series, the left table acts as the driving table; in the Right Join series, the right table acts as the driving table.
 
-2. Join Condition
+1. Join Condition
 
 In TDengine, the join condition refers to the condition specified for table association. For all association queries (except ASOF Join and Window Join), a join condition must be specified, usually appearing after `on`. In ASOF Join, conditions appearing after `where` can also be considered as join conditions, while Window Join specifies join conditions through `window_offset`.
 
@@ -655,17 +710,17 @@ select a.* from meters a left join meters b on timetruncate(a.ts, 1s) = timetrun
 select a.* from meters a left asof join meters b on timetruncate(a.ts, 1s) < timetruncate(b.ts, 1s) and a.groupId = b.groupId;
 ```
 
-3. Primary Join Condition
+1. Primary Join Condition
 
 As a time-series database, all association queries in TDengine revolve around the primary key column. Therefore, for all association queries except ASOF Join and Window Join, an equality join condition on the primary key column must be included. The first appearing primary key column equality join condition in the join conditions will be considered as the primary join condition. The primary join condition of ASOF Join can include non-equality conditions, while the primary join condition of Window Join is specified through `window_offset`.
 
 Except for Window Join, TDengine supports performing `timetruncate` function operations in the primary join condition, such as `on timetruncate(a.ts, 1s) = timetruncate(b.ts, 1s)`. Apart from this, other functions and scalar operations are currently not supported.
 
-4. Grouping Condition
+1. Grouping Condition
 
 The time-series database features of ASOF Join and Window Join support grouping the input data of the association query first, and then performing association operations for each group. Grouping only applies to the input of the association query, and the output results will not contain grouping information. Equality conditions appearing after `on` in ASOF Join and Window Join (except for the primary join condition of ASOF Join) will be treated as grouping conditions.
 
-5. Primary Key Timeline
+1. Primary Key Timeline
 
 As a time-series database, TDengine requires each table (subtable) to have a primary key timestamp column, which will serve as the primary key timeline of the table for many time-related operations, and in the results of subqueries or Join operations, it is also necessary to clearly identify which column will be considered as the primary key timeline for subsequent time-related operations. In subqueries, the first appearing ordered primary key column (or its operation) or pseudo primary key column (_wstart,_wend) in the query results will be considered as the primary key timeline of the output table. The selection of the primary key timeline in Join output results follows these rules:
 
@@ -699,7 +754,7 @@ The table below lists the types of Joins supported in TDengine and their definit
 
 Currently, all Join operations in TDengine require the input data to contain a valid primary key timeline. For all table queries, this requirement is usually met. However, for subqueries, it is necessary to ensure that the output data contains a valid primary key timeline.
 
-2. Join Condition Limitations
+1. Join Condition Limitations
 
 The limitations on join conditions include the following.
 
@@ -707,7 +762,7 @@ The limitations on join conditions include the following.
 - Only and operations are supported between the primary join condition and other conditions.
 - The primary key column as the primary join condition only supports the timetruncate function operation, not other functions and scalar operations, while there are no restrictions when used as other conditions.
 
-3. Grouping Condition Limitations
+1. Grouping Condition Limitations
 
 The limitations on grouping conditions include the following.
 
@@ -715,7 +770,7 @@ The limitations on grouping conditions include the following.
 - Does not support scalar operations.
 - Supports multiple grouping conditions, only and operations are supported between conditions.
 
-4. Query Result Order Limitations
+1. Query Result Order Limitations
 
 The limitations on the order of query results include the following.
 

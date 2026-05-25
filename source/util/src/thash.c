@@ -31,12 +31,12 @@
 #define GET_HASH_NODE_DATA(_n) ((char *)(_n) + sizeof(SHashNode))
 #define GET_HASH_PNODE(_n)     ((SHashNode *)((char *)(_n) - sizeof(SHashNode)))
 
-#define FREE_HASH_NODE(_fp, _n)      \
-  do {                               \
-    if (_fp != NULL) {               \
-      (_fp)(GET_HASH_NODE_DATA(_n)); \
-    }                                \
-    taosMemoryFreeClear(_n);         \
+#define FREE_HASH_NODE(_fp, _n)                              \
+  do {                                                       \
+    if (_fp != NULL && (((SHashNode *)(_n))->dataLen > 0)) { \
+      (_fp)(GET_HASH_NODE_DATA(_n));                         \
+    }                                                        \
+    taosMemoryFreeClear(_n);                                 \
   } while (0);
 
 struct SHashNode {
@@ -401,6 +401,7 @@ int32_t taosHashGetDup_m(SHashObj *pHashObj, const void *key, size_t keyLen, voi
 
 void *taosHashGetImpl(SHashObj *pHashObj, const void *key, size_t keyLen, void **d, int32_t *size, bool addRef) {
   if (pHashObj == NULL || keyLen == 0 || key == NULL) {
+    terrno = TSDB_CODE_INVALID_PTR;
     return NULL;
   }
 

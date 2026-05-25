@@ -31,6 +31,7 @@
 #include "tthread.h"
 #include "ttime.h"
 #include "tworker.h"
+#include "tjson.h"
 
 #include "dnode.h"
 #include "mnode.h"
@@ -98,7 +99,9 @@ typedef enum {
   VNODE = 2,
   QNODE = 3,
   SNODE = 4,
-  NODE_END = 5,
+  BNODE = 5,
+  XNODE = 6,
+  NODE_END = 7,
 } EDndNodeType;
 
 typedef enum {
@@ -114,12 +117,17 @@ typedef enum {
 } EDndEnvStatus;
 
 typedef int32_t (*ProcessCreateNodeFp)(EDndNodeType ntype, SRpcMsg *pMsg);
+typedef int32_t (*ProcessAlterNodeFp)(EDndNodeType ntype, SRpcMsg *pMsg);
 typedef int32_t (*ProcessDropNodeFp)(EDndNodeType ntype, SRpcMsg *pMsg);
 typedef void (*SendMonitorReportFp)();
+typedef void (*SendMetricsReportFp)();
 typedef void (*MonitorCleanExpiredSamplesFp)();
+typedef void (*MetricsCleanExpiredSamplesFp)();
 typedef void (*SendAuditRecordsFp)();
 typedef void (*GetVnodeLoadsFp)(SMonVloadInfo *pInfo);
 typedef void (*GetMnodeLoadsFp)(SMonMloadInfo *pInfo);
+typedef void (*SetMnodeSyncTimeoutFp)();
+typedef void (*SetVnodeSyncTimeoutFp)();
 typedef void (*GetQnodeLoadsFp)(SQnodeLoad *pInfo);
 typedef int32_t (*ProcessAlterNodeTypeFp)(EDndNodeType ntype, SRpcMsg *pMsg);
 typedef void (*StopDnodeFp)();
@@ -141,6 +149,7 @@ typedef struct {
   SMsgCb         msgCb;
   bool           validMnodeEps;
   int64_t        ipWhiteVer;
+  int64_t        timeWhiteVer;
   char           machineId[TSDB_MACHINE_ID_LEN + 1];
   EEncryptAlgor  encryptAlgorigthm;
   EEncryptScope  encryptScope;
@@ -148,20 +157,26 @@ typedef struct {
 } SDnodeData;
 
 typedef struct {
+  int32_t                      dnodeId;
   const char                  *path;
   const char                  *name;
   STfs                        *pTfs;
   SDnodeData                  *pData;
   SMsgCb                       msgCb;
   ProcessCreateNodeFp          processCreateNodeFp;
+  ProcessAlterNodeFp           processAlterNodeFp;
   ProcessAlterNodeTypeFp       processAlterNodeTypeFp;
   ProcessDropNodeFp            processDropNodeFp;
   SendMonitorReportFp          sendMonitorReportFp;
-  MonitorCleanExpiredSamplesFp monitorCleanExpiredSamplesFp;
+  SendMetricsReportFp          sendMetricsReportFp;
+  MonitorCleanExpiredSamplesFp  monitorCleanExpiredSamplesFp;
+  MetricsCleanExpiredSamplesFp metricsCleanExpiredSamplesFp;
   SendAuditRecordsFp           sendAuditRecordFp;
   GetVnodeLoadsFp              getVnodeLoadsFp;
   GetVnodeLoadsFp              getVnodeLoadsLiteFp;
+  SetVnodeSyncTimeoutFp        setVnodeSyncTimeoutFp;
   GetMnodeLoadsFp              getMnodeLoadsFp;
+  SetMnodeSyncTimeoutFp        setMnodeSyncTimeoutFp;
   GetQnodeLoadsFp              getQnodeLoadsFp;
   StopDnodeFp                  stopDnodeFp;
 } SMgmtInputOpt;
@@ -209,7 +224,11 @@ void        dmGetMonitorSystemInfo(SMonSysInfo *pInfo);
 
 // dmFile.c
 int32_t dmReadFile(const char *path, const char *name, bool *pDeployed);
+int32_t dmReadFileJson(const char *path, const char *name, SJson **ppJson, bool* deployed);
 int32_t dmWriteFile(const char *path, const char *name, bool deployed);
+int32_t dmWriteFileWithEncrypted(const char *path, const char *name, bool deployed, bool encrypted);
+int32_t dmWriteFileJson(const char *path, const char *name, SJson *pJson);
+int32_t dmWriteFileJsonWithEncrypted(const char *path, const char *name, SJson *pJson, bool encrypted);
 int32_t dmCheckRunning(const char *dataDir, TdFilePtr *pFile);
 // int32_t dmCheckRunningWrapper(const char *dataDir, TdFilePtr *pFile);
 
@@ -222,7 +241,7 @@ int32_t dmGetDnodeId(SDnodeData *pData);
 int32_t dmReadEps(SDnodeData *pData);
 int32_t dmWriteEps(SDnodeData *pData);
 void    dmUpdateEps(SDnodeData *pData, SArray *pDnodeEps);
-void    dmGetMnodeEpSet(SDnodeData *pData, SEpSet *pEpSet);
+void    dmGetMnodeEpSet(void *pData, SEpSet *pEpSet);
 void    dmEpSetToStr(char *buf, int32_t len, SEpSet *epSet);
 void    dmRotateMnodeEpSet(SDnodeData *pData);
 void    dmGetMnodeEpSetForRedirect(SDnodeData *pData, SRpcMsg *pMsg, SEpSet *pEpSet);
@@ -232,6 +251,8 @@ void    dmRemoveDnodePairs(SDnodeData *pData);
 void    dmGetDnodeEp(void *pData, int32_t dnodeId, char *pEp, char *pFqdn, uint16_t *pPort);
 int32_t dmUpdateEncryptKey(char *key, bool toLogFile);
 int32_t dmGetEncryptKey();
+
+SEpSet* dmGetSynEpset(int32_t leaderId);
 #ifdef __cplusplus
 }
 #endif

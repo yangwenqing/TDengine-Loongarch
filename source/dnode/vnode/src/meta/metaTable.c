@@ -21,8 +21,8 @@ int32_t metaAddTableColumn(SMeta *pMeta, int64_t version, SVAlterTbReq *pReq, ST
 int32_t metaDropTableColumn(SMeta *pMeta, int64_t version, SVAlterTbReq *pReq, STableMetaRsp *pRsp);
 int32_t metaAlterTableColumnName(SMeta *pMeta, int64_t version, SVAlterTbReq *pReq, STableMetaRsp *pRsp);
 int32_t metaAlterTableColumnBytes(SMeta *pMeta, int64_t version, SVAlterTbReq *pReq, STableMetaRsp *pRsp);
-int32_t metaUpdateTableTagValue(SMeta *pMeta, int64_t version, SVAlterTbReq *pReq);
-int32_t metaUpdateTableMultiTagValue(SMeta *pMeta, int64_t version, SVAlterTbReq *pReq);
+int32_t metaUpdateTableMultiTableTagValue(SMeta *pMeta, int64_t version, SVAlterTbReq *pReq);
+int32_t metaUpdateTableChildTableTagValue(SMeta *pMeta, int64_t version, SVAlterTbReq *pReq);
 int32_t metaUpdateTableOptions2(SMeta *pMeta, int64_t version, SVAlterTbReq *pReq);
 int32_t metaUpdateTableColCompress2(SMeta *pMeta, int64_t version, SVAlterTbReq *pReq);
 int32_t metaAlterTableColumnRef(SMeta *pMeta, int64_t version, SVAlterTbReq *pReq, STableMetaRsp *pRsp);
@@ -106,7 +106,6 @@ int32_t dropTableExtSchema(SMetaEntry *pEntry, int32_t dropColId, int32_t newCol
 
 int32_t updataTableColRef(SColRefWrapper *pWp, const SSchema *pSchema, int8_t add, SColRef *pColRef) {
   int32_t nCols = pWp->nCols;
-  int32_t ver = pWp->version;
   if (add) {
     SColRef *p = taosMemoryRealloc(pWp->pColRef, sizeof(SColRef) * (nCols + 1));
     if (p == NULL) {
@@ -128,7 +127,7 @@ int32_t updataTableColRef(SColRefWrapper *pWp, const SSchema *pSchema, int8_t ad
       }
     }
     pWp->nCols = nCols + 1;
-    pWp->version = ver;
+    pWp->version++;
   } else {
     for (int32_t i = 0; i < nCols; i++) {
       SColRef *pOColRef = &pWp->pColRef[i];
@@ -142,12 +141,12 @@ int32_t updataTableColRef(SColRefWrapper *pWp, const SSchema *pSchema, int8_t ad
       }
     }
     pWp->nCols = nCols;
-    pWp->version = ver;
+    pWp->version++;
   }
   return 0;
 }
 
-int metaUpdateMetaRsp(tb_uid_t uid, char *tbName, SSchemaWrapper *pSchema, STableMetaRsp *pMetaRsp) {
+int metaUpdateMetaRsp(tb_uid_t uid, char *tbName, SSchemaWrapper *pSchema, int64_t ownerId, STableMetaRsp *pMetaRsp) {
   pMetaRsp->pSchemas = taosMemoryMalloc(pSchema->nCols * sizeof(SSchema));
   if (NULL == pMetaRsp->pSchemas) {
     return terrno;
@@ -163,16 +162,36 @@ int metaUpdateMetaRsp(tb_uid_t uid, char *tbName, SSchemaWrapper *pSchema, STabl
   pMetaRsp->numOfColumns = pSchema->nCols;
   pMetaRsp->tableType = TSDB_NORMAL_TABLE;
   pMetaRsp->sversion = pSchema->version;
+  pMetaRsp->rversion = 1;
   pMetaRsp->tuid = uid;
   pMetaRsp->virtualStb = false; // super table will never be processed here
+  if (ownerId != 0) pMetaRsp->ownerId = ownerId;
 
   memcpy(pMetaRsp->pSchemas, pSchema->pSchema, pSchema->nCols * sizeof(SSchema));
 
   return 0;
 }
 
-int32_t metaUpdateVtbMetaRsp(tb_uid_t uid, char *tbName, SSchemaWrapper *pSchema, SColRefWrapper *pRef,
-                             STableMetaRsp *pMetaRsp, int8_t tableType) {
+static int32_t metaFillRspSchemaExt(const SSchemaWrapper *pSchema, const SExtSchema *pExtSchemas, SSchemaExt *pSchemaExt) {
+  if (pSchema == NULL || pSchemaExt == NULL) {
+    return TSDB_CODE_SUCCESS;
+  }
+
+  for (int32_t i = 0; i < pSchema->nCols; ++i) {
+    pSchemaExt[i].colId = pSchema->pSchema[i].colId;
+  }
+
+  if (pExtSchemas != NULL) {
+    for (int32_t i = 0; i < pSchema->nCols; ++i) {
+      pSchemaExt[i].typeMod = pExtSchemas[i].typeMod;
+    }
+  }
+
+  return TSDB_CODE_SUCCESS;
+}
+
+int32_t metaUpdateVtbMetaRsp(SMetaEntry *pEntry, char *tbName, const SSchemaWrapper *pSchema, const SColRefWrapper *pRef,
+                             const SExtSchema *pExtSchemas, int64_t ownerId, STableMetaRsp *pMetaRsp, int8_t tableType) {
   int32_t code = TSDB_CODE_SUCCESS;
   if (!pRef) {
     return TSDB_CODE_INVALID_PARA;
@@ -184,7 +203,7 @@ int32_t metaUpdateVtbMetaRsp(tb_uid_t uid, char *tbName, SSchemaWrapper *pSchema
       goto _return;
     }
 
-    pMetaRsp->pSchemaExt = taosMemoryMalloc(pSchema->nCols * sizeof(SSchemaExt));
+    pMetaRsp->pSchemaExt = taosMemoryCalloc(pSchema->nCols, sizeof(SSchemaExt));
     if (pMetaRsp->pSchemaExt == NULL) {
       code = terrno;
       goto _return;
@@ -193,24 +212,59 @@ int32_t metaUpdateVtbMetaRsp(tb_uid_t uid, char *tbName, SSchemaWrapper *pSchema
     pMetaRsp->numOfColumns = pSchema->nCols;
     pMetaRsp->sversion = pSchema->version;
     memcpy(pMetaRsp->pSchemas, pSchema->pSchema, pSchema->nCols * sizeof(SSchema));
+
+    code = metaFillRspSchemaExt(pSchema, pExtSchemas, pMetaRsp->pSchemaExt);
+    if (code != TSDB_CODE_SUCCESS) {
+      goto _return;
+    }
   }
-  pMetaRsp->pColRefs = taosMemoryMalloc(pRef->nCols * sizeof(SColRef));
-  if (NULL == pMetaRsp->pColRefs) {
-    code = terrno;
-    goto _return;
+
+  if (pRef->nCols > 0) {
+    pMetaRsp->pColRefs = taosMemoryMalloc(pRef->nCols * sizeof(SColRef));
+    if (NULL == pMetaRsp->pColRefs) {
+      code = terrno;
+      goto _return;
+    }
+
+    memcpy(pMetaRsp->pColRefs, pRef->pColRef, pRef->nCols * sizeof(SColRef));
+  } else {
+    pMetaRsp->pColRefs = NULL;
   }
-  memcpy(pMetaRsp->pColRefs, pRef->pColRef, pRef->nCols * sizeof(SColRef));
+
   tstrncpy(pMetaRsp->tbName, tbName, TSDB_TABLE_NAME_LEN);
-  pMetaRsp->tuid = uid;
+  if (tableType == TSDB_VIRTUAL_NORMAL_TABLE) {
+    pMetaRsp->tuid = pEntry->uid;
+  } else if (tableType == TSDB_VIRTUAL_CHILD_TABLE) {
+    pMetaRsp->tuid = pEntry->uid;
+    pMetaRsp->suid = pEntry->ctbEntry.suid;
+  }
+
   pMetaRsp->tableType = tableType;
   pMetaRsp->virtualStb = false; // super table will never be processed here
   pMetaRsp->numOfColRefs = pRef->nCols;
+  pMetaRsp->rversion = pRef->version;
+  if (ownerId != 0) pMetaRsp->ownerId = ownerId;
+
+  // Populate tag references
+  if (pRef->nTagRefs > 0 && pRef->pTagRef) {
+    pMetaRsp->pTagRefs = taosMemoryMalloc(pRef->nTagRefs * sizeof(SColRef));
+    if (NULL == pMetaRsp->pTagRefs) {
+      code = terrno;
+      goto _return;
+    }
+    memcpy(pMetaRsp->pTagRefs, pRef->pTagRef, pRef->nTagRefs * sizeof(SColRef));
+    pMetaRsp->numOfTagRefs = pRef->nTagRefs;
+  } else {
+    pMetaRsp->pTagRefs = NULL;
+    pMetaRsp->numOfTagRefs = 0;
+  }
 
   return code;
 _return:
   taosMemoryFreeClear(pMetaRsp->pSchemaExt);
   taosMemoryFreeClear(pMetaRsp->pSchemas);
   taosMemoryFreeClear(pMetaRsp->pColRefs);
+  taosMemoryFreeClear(pMetaRsp->pTagRefs);
   return code;
 }
 
@@ -481,6 +535,7 @@ static int32_t metaFilterTableByHash(SMeta *pMeta, SArray *uidList) {
       char tbFName[TSDB_TABLE_FNAME_LEN + 1];
       snprintf(tbFName, sizeof(tbFName), "%s.%s", pMeta->pVnode->config.dbname, me.name);
       tbFName[TSDB_TABLE_FNAME_LEN] = '\0';
+      if (pMeta->pVnode->mounted) tTrimMountPrefix(tbFName);
       ret = vnodeValidateTableHash(pMeta->pVnode, tbFName);
       if (ret < 0 && terrno == TSDB_CODE_VND_HASH_MISMATCH) {
         if (taosArrayPush(uidList, &me.uid) == NULL) {
@@ -631,6 +686,14 @@ static int metaDropTableByUid(SMeta *pMeta, tb_uid_t uid, int *type, tb_uid_t *p
         }
 
         if (pSysTbl) *pSysTbl = metaTbInFilterCache(pMeta, stbEntry.name, 1) ? 1 : 0;
+        
+        ret = metaStableTagFilterCacheUpdateUid(
+          pMeta, &e, &stbEntry, STABLE_TAG_FILTER_CACHE_DROP_TABLE);
+        if (ret < 0) {
+          metaError("vgId:%d, failed to update stable tag filter cache:%s "
+            "uid:%" PRId64 " since %s", TD_VID(pMeta->pVnode), e.name,
+            e.ctbEntry.suid, tstrerror(ret));
+        }
 
         SSchema        *pTagColumn = NULL;
         SSchemaWrapper *pTagSchema = &stbEntry.stbEntry.schemaTag;
@@ -759,6 +822,11 @@ static int metaDropTableByUid(SMeta *pMeta, tb_uid_t uid, int *type, tb_uid_t *p
       metaError("vgId:%d, failed to clear uid cache:%s uid:%" PRId64 " since %s", TD_VID(pMeta->pVnode), e.name, e.uid,
                 tstrerror(ret));
     }
+    ret = metaStableTagFilterCacheDropSTable(pMeta, uid);
+    if (ret < 0) {
+      metaError("vgId:%d, failed to clear stable tag filter cache:%s uid:%" PRId64 " since %s", TD_VID(pMeta->pVnode), e.name,
+                e.uid, tstrerror(ret));
+    }
     ret = metaTbGroupCacheClear(pMeta, uid);
     if (ret < 0) {
       metaError("vgId:%d, failed to clear group cache:%s uid:%" PRId64 " since %s", TD_VID(pMeta->pVnode), e.name,
@@ -808,10 +876,10 @@ int metaAlterTable(SMeta *pMeta, int64_t version, SVAlterTbReq *pReq, STableMeta
       return metaAlterTableColumnBytes(pMeta, version, pReq, pMetaRsp);
     case TSDB_ALTER_TABLE_UPDATE_COLUMN_NAME:
       return metaAlterTableColumnName(pMeta, version, pReq, pMetaRsp);
-    case TSDB_ALTER_TABLE_UPDATE_TAG_VAL:
-      return metaUpdateTableTagValue(pMeta, version, pReq);
-    case TSDB_ALTER_TABLE_UPDATE_MULTI_TAG_VAL:
-      return metaUpdateTableMultiTagValue(pMeta, version, pReq);
+    case TSDB_ALTER_TABLE_UPDATE_MULTI_TABLE_TAG_VAL:
+      return metaUpdateTableMultiTableTagValue(pMeta, version, pReq);
+    case TSDB_ALTER_TABLE_UPDATE_CHILD_TABLE_TAG_VAL:
+      return metaUpdateTableChildTableTagValue(pMeta, version, pReq);
     case TSDB_ALTER_TABLE_UPDATE_OPTIONS:
       return metaUpdateTableOptions2(pMeta, version, pReq);
     case TSDB_ALTER_TABLE_UPDATE_COLUMN_COMPRESS:
@@ -920,7 +988,7 @@ int32_t metaGetColCmpr(SMeta *pMeta, tb_uid_t uid, SHashObj **ppColCmprObj) {
   metaRLock(pMeta);
   rc = tdbTbGet(pMeta->pUidIdx, &uid, sizeof(uid), &pData, &nData);
   if (rc < 0) {
-    taosHashClear(pColCmprObj);
+    taosHashCleanup(pColCmprObj);
     metaULock(pMeta);
     return TSDB_CODE_FAILED;
   }
@@ -928,7 +996,7 @@ int32_t metaGetColCmpr(SMeta *pMeta, tb_uid_t uid, SHashObj **ppColCmprObj) {
   rc = tdbTbGet(pMeta->pTbDb, &(STbDbKey){.version = version, .uid = uid}, sizeof(STbDbKey), &pData, &nData);
   if (rc < 0) {
     metaULock(pMeta);
-    taosHashClear(pColCmprObj);
+    taosHashCleanup(pColCmprObj);
     metaError("failed to get table entry");
     return rc;
   }
@@ -939,10 +1007,10 @@ int32_t metaGetColCmpr(SMeta *pMeta, tb_uid_t uid, SHashObj **ppColCmprObj) {
     tDecoderClear(&dc);
     tdbFree(pData);
     metaULock(pMeta);
-    taosHashClear(pColCmprObj);
+    taosHashCleanup(pColCmprObj);
     return rc;
   }
-  if (withExtSchema(e.type)) {
+  if (withColCompress(e.type)) {
     SColCmprWrapper *p = &e.colCmpr;
     for (int32_t i = 0; i < p->nCols; i++) {
       SColCmpr *pCmpr = &p->pColCmpr[i];
@@ -951,7 +1019,7 @@ int32_t metaGetColCmpr(SMeta *pMeta, tb_uid_t uid, SHashObj **ppColCmprObj) {
         tDecoderClear(&dc);
         tdbFree(pData);
         metaULock(pMeta);
-        taosHashClear(pColCmprObj);
+        taosHashCleanup(pColCmprObj);
         return rc;
       }
     }
@@ -959,7 +1027,7 @@ int32_t metaGetColCmpr(SMeta *pMeta, tb_uid_t uid, SHashObj **ppColCmprObj) {
     tDecoderClear(&dc);
     tdbFree(pData);
     metaULock(pMeta);
-    taosHashClear(pColCmprObj);
+    taosHashCleanup(pColCmprObj);
     return 0;
   }
   tDecoderClear(&dc);

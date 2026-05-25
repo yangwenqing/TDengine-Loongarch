@@ -13,8 +13,11 @@ IF(NOT TD_WINDOWS)
 
     TARGET_LINK_LIBRARIES(
             tqTest
-            PUBLIC os util common vnode
+            PUBLIC os util common
     )
+    # Handle circular dependencies by listing libraries multiple times
+    # This works on all platforms (Linux, macOS, Windows)
+    target_link_libraries(tqTest PUBLIC vnode mgmt_mnode vnode mgmt_mnode)
 
     enable_testing()
 
@@ -24,15 +27,52 @@ IF(NOT TD_WINDOWS)
     )
 ENDIF()
 
-# ADD_EXECUTABLE(tsdbSmaTest tsdbSmaTest.cpp)
+
+ADD_EXECUTABLE(bseTest bseTest.cpp)
+DEP_ext_gtest(bseTest)
+TARGET_LINK_LIBRARIES(
+         bseTest
+         PUBLIC os util common vnode
+)
+
+TARGET_INCLUDE_DIRECTORIES(
+         bseTest
+         PUBLIC "${TD_SOURCE_DIR}/include/common"
+         PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../src/inc"
+         PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../inc"
+)
+
+IF(NOT TD_WINDOWS)
+    ADD_EXECUTABLE(tsdbCacheTest tsdbCacheTest.cpp)
+    DEP_ext_gtest(tsdbCacheTest)
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(tsdbCacheTest PRIVATE -fpermissive -Wno-error)
+    endif()
+    TARGET_LINK_LIBRARIES(
+             tsdbCacheTest
+             PUBLIC os util common vnode
+    )
+
+    TARGET_INCLUDE_DIRECTORIES(
+             tsdbCacheTest
+             PUBLIC "${TD_SOURCE_DIR}/include/common"
+             PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../src/inc"
+             PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../src/tsdb"
+             PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../inc"
+    )
+ENDIF()
+
+# ADD_EXECUTABLE(tsdbRepairTest tsdbRepairTest.cpp)
+# DEP_ext_gtest(tsdbRepairTest)
 # TARGET_LINK_LIBRARIES(
-#         tsdbSmaTest
-#         PUBLIC os util common vnode gtest_main
+#          tsdbRepairTest
+#          PUBLIC os util common vnode
 # )
 
 # TARGET_INCLUDE_DIRECTORIES(
-#         tsdbSmaTest
-#         PUBLIC "${TD_SOURCE_DIR}/include/common"
-#         PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../src/inc"
-#         PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../inc"
+#          tsdbRepairTest
+#          PUBLIC "${TD_SOURCE_DIR}/include/common"
+#          PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../src/inc"
+#          PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../src/tsdb"
+#          PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../inc"
 # )

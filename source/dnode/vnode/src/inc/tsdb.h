@@ -295,7 +295,8 @@ int32_t tsdbReadDelIdx(SDelFReader *pReader, SArray *aDelIdx);
 // tsdbRead.c ==============================================================================================
 int32_t tsdbTakeReadSnap2(STsdbReader *pReader, _query_reseek_func_t reseek, STsdbReadSnap **ppSnap, const char *id);
 void    tsdbUntakeReadSnap2(STsdbReader *pReader, STsdbReadSnap *pSnap, bool proactive);
-int32_t tsdbGetTableSchema(SMeta *pMeta, int64_t uid, STSchema **pSchema, int64_t *suid);
+int32_t tsdbGetTableSchema(SMeta *pMeta, int64_t uid, STSchema **pSchema, int64_t *suid,
+                           SSchemaWrapper **pSchemaWrapper);
 
 // tsdbMerge.c ==============================================================================================
 typedef struct {
@@ -358,10 +359,12 @@ typedef struct {
 } SCacheFlushState;
 
 typedef struct SCompMonitor SCompMonitor;
-
+typedef struct SRetentionMonitor SRetentionMonitor;
+typedef struct SSsMigrateMonitor SSsMigrateMonitor;
 struct STsdb {
   char                *path;
   SVnode              *pVnode;
+  char                 name[VNODE_TSDB_NAME_LEN];
   STsdbKeepCfg         keepCfg;
   TdThreadMutex        mutex;
   bool                 bgTaskDisabled;
@@ -379,10 +382,13 @@ struct STsdb {
   struct STFileSystem *pFS;  // new
   SRocksCache          rCache;
   SCompMonitor        *pCompMonitor;
+  SRetentionMonitor   *pRetentionMonitor;
+  SSsMigrateMonitor   *pSsMigrateMonitor;
   struct {
     SVHashTable *ht;
     SArray      *arr;
   } *commitInfo;
+  struct SScanMonitor *pScanMonitor;
 };
 
 struct TSDBKEY {
@@ -442,6 +448,7 @@ struct TSDBROW {
       int32_t     iRow;
     };
   };
+  void *arg;
 };
 
 struct SMemSkipListNode {
@@ -649,6 +656,7 @@ struct SRowMerger {
   STSchema *pTSchema;
   int64_t   version;
   SArray   *pArray;  // SArray<SColVal>
+  void     *arg;
 };
 
 typedef struct {
@@ -661,7 +669,7 @@ typedef struct {
   int64_t     szFile;
   STsdb      *pTsdb;
   const char *objName;
-  uint8_t     s3File;
+  uint8_t     ssFile;
   int32_t     lcn;
   int32_t     fid;
   int64_t     cid;
@@ -784,6 +792,7 @@ typedef struct SBlockDataInfo {
 
 // todo: move away
 typedef struct {
+  int32_t memSize;
   SArray *pUid;
   SArray *pFirstTs;
   SArray *pLastTs;
@@ -884,6 +893,7 @@ typedef struct SMergeTreeConf {
   STimeWindow   timewindow;
   SVersionRange verRange;
   bool          strictTimeRange;
+  bool          cacheStatis;    // cache the stt statis file info in cache
   SArray       *pSttFileBlockIterArray;
   void         *pCurrentFileset;
   STSchema     *pSchema;
@@ -943,6 +953,7 @@ typedef struct {
 
 int32_t tsdbOpenCache(STsdb *pTsdb);
 void    tsdbCloseCache(STsdb *pTsdb);
+int32_t tsdbRebuildLastCache(STsdb *pTsdb, int32_t numShardBits);
 int32_t tsdbCacheRowFormatUpdate(STsdb *pTsdb, tb_uid_t suid, tb_uid_t uid, int64_t version, int32_t nRow, SRow **aRow);
 int32_t tsdbCacheColFormatUpdate(STsdb *pTsdb, tb_uid_t suid, tb_uid_t uid, SBlockData *pBlockData);
 int32_t tsdbCacheDel(STsdb *pTsdb, tb_uid_t suid, tb_uid_t uid, TSKEY sKey, TSKEY eKey);
@@ -954,14 +965,15 @@ void    tsdbCacheRelease(SLRUCache *pCache, LRUHandle *h);
 int32_t tsdbCacheGetBlockIdx(SLRUCache *pCache, SDataFReader *pFileReader, LRUHandle **handle);
 int32_t tsdbBICacheRelease(SLRUCache *pCache, LRUHandle *h);
 
-int32_t tsdbCacheGetBlockS3(SLRUCache *pCache, STsdbFD *pFD, LRUHandle **handle);
-int32_t tsdbCacheGetPageS3(SLRUCache *pCache, STsdbFD *pFD, int64_t pgno, LRUHandle **handle);
-void    tsdbCacheSetPageS3(SLRUCache *pCache, STsdbFD *pFD, int64_t pgno, uint8_t *pPage);
+int32_t tsdbCacheGetBlockSs(SLRUCache *pCache, STsdbFD *pFD, LRUHandle **handle);
+int32_t tsdbCacheGetPageSs(SLRUCache *pCache, STsdbFD *pFD, int64_t pgno, LRUHandle **handle);
+void    tsdbCacheSetPageSs(SLRUCache *pCache, STsdbFD *pFD, int64_t pgno, uint8_t *pPage);
 
 int32_t tsdbCacheDeleteLastrow(SLRUCache *pCache, tb_uid_t uid, TSKEY eKey);
 int32_t tsdbCacheDeleteLast(SLRUCache *pCache, tb_uid_t uid, TSKEY eKey);
 int32_t tsdbCacheDelete(SLRUCache *pCache, tb_uid_t uid, TSKEY eKey);
 
+int32_t tsdbCacheDeserialize(char const *value, size_t size, SLastCol **pLastCol);
 int32_t tsdbGetFsSize(STsdb *tsdb, SDbSizeStatisInfo *pInfo);
 
 // ========== inline functions ==========

@@ -1,19 +1,8 @@
 ---
 title: MongoDB
-slug: /advanced-features/data-connectors/mongodb
 ---
 
-import Image from '@theme/IdealImage';
-import imgStep01 from '../../assets/mongodb-01.png';
-import imgStep02 from '../../assets/mongodb-02.png';
-import imgStep03 from '../../assets/mongodb-03.png';
-import imgStep04 from '../../assets/mongodb-04.png';
-import imgStep05 from '../../assets/mongodb-05.png';
-import imgStep06 from '../../assets/mongodb-06.png';
-import imgStep07 from '../../assets/mongodb-07.png';
-import imgStep08 from '../../assets/mongodb-08.png';
-
-import Enterprise from '../../assets/resources/_enterprise.mdx';
+import { AddDataSource, Enterprise } from '../../assets/resources/_resources.mdx';
 
 <Enterprise/>
 
@@ -21,41 +10,21 @@ This section describes how to create data migration tasks through the Explorer i
 
 ## Feature Overview
 
-MongoDB is a product that lies between relational and non-relational databases, widely used in content management systems, mobile applications, and the Internet of Things, among other fields. Starting from TDengine Enterprise Edition 3.3.3.0, TDengine can efficiently read data from MongoDB and write it into TDengine, achieving historical data migration or real-time data synchronization, and addressing technical pain points faced by businesses.
+MongoDB is a product that lies between relational and non-relational databases, widely used in content management systems, mobile applications, and the Internet of Things, among other fields. TDengine TSDB-Enterprise can efficiently read data from MongoDB and write it into TDengine, achieving historical data migration or real-time data synchronization, and addressing technical pain points faced by businesses.
 
-## Creating a Task
+## Procedure
 
-### 1. Add a Data Source
+### Add a Data Source
 
-Click the **+ Add Data Source** button in the top right corner of the data writing page to enter the Add Data Source page, as shown below:
+<AddDataSource connectorName="MongoDB" />
 
-<figure>
-<Image img={imgStep01} alt=""/>
-</figure>
-
-### 2. Configure Basic Information
-
-Enter the task name in the **Name** field, for example `test_mongodb_01`.
-
-Select `MongoDB` from the **Type** dropdown menu, as shown below (the fields on the page will change after selection).
-
-**Proxy** is optional. If needed, you can select a specific proxy from the dropdown menu, or click the **+ Create New Proxy** button on the right to create a new proxy.
-
-**Target Database** is mandatory. You can select a specific database from the dropdown menu, or click the **+ Create Database** button on the right to create a new database.
-
-<figure>
-<Image img={imgStep02} alt=""/>
-</figure>
-
-### 3. Configure Connection Information
+### Configure Connection Information
 
 Fill in the *connection information for the source MongoDB database* in the **Connection Configuration** area, as shown below:
 
-<figure>
-<Image img={imgStep03} alt=""/>
-</figure>
+![Configure connection information](../../assets/mongodb-03.png)
 
-### 4. Configure Authentication Information
+### Configure Authentication Information
 
 **User** Enter the user of the source MongoDB database, who must have read permissions in the MongoDB system.
 
@@ -63,11 +32,9 @@ Fill in the *connection information for the source MongoDB database* in the **Co
 
 **Authentication Database** The database in MongoDB where user information is stored, default is admin.
 
-<figure>
-<Image img={imgStep04} alt=""/>
-</figure>
+![Configure authentication information](../../assets/mongodb-04.png)
 
-### 5. Configure Connection Options
+### Configure Connection Options
 
 **Application Name** Set the application name to identify the connected application.
 
@@ -77,13 +44,11 @@ Fill in the *connection information for the source MongoDB database* in the **Co
 
 &emsp; 2. **Certificate File** Upload the SSL encryption certificate file.
 
-<figure>
-<Image img={imgStep05} alt=""/>
-</figure>
+![Configure application name and SSL certificate](../../assets/mongodb-05.png)
 
 Then click the **Check Connectivity** button, where users can click this button to check if the information filled in above can normally retrieve data from the source MongoDB database.
 
-### 6. Configure Data Query
+### Configure Data Query
 
 **Database** The source database in MongoDB, which can be dynamically configured using placeholders, such as `database_${Y}`. See the table below for a list of available placeholders.
 
@@ -129,11 +94,9 @@ Different placeholders represent different time format requirements, specificall
 
 **Delay Duration** In real-time data synchronization scenarios, to avoid losing data due to delayed writes, each synchronization task will read data from before the delay duration.
 
-<figure>
-<Image img={imgStep06} alt=""/>
-</figure>
+![Configure data collection](../../assets/mongodb-06.png)
 
-### 7. Configure Data Mapping
+### Configure Data Mapping
 
 Fill in the data mapping related configuration parameters in the **Payload Transformation** area.
 
@@ -147,11 +110,9 @@ In **Filter**, fill in the filtering conditions, for example: write `Value > 0`,
 
 In **Mapping**, select the supertable in TDengine to which the data will be mapped, as well as the columns to map to the supertable, and click the **Preview** button on the right to view the mapping results after configuration.
 
-<figure>
-<Image img={imgStep07} alt=""/>
-</figure>
+![Configure data mapping](../../assets/mongodb-07.png)
 
-### 8. Configure Advanced Options
+### Configure Advanced Options
 
 The **Advanced Options** area is collapsed by default, click the `>` on the right to expand it, as shown below:
 
@@ -159,10 +120,8 @@ The **Advanced Options** area is collapsed by default, click the `>` on the righ
 
 **Batch Size** The maximum number of messages or rows sent at once. Default is 10000.
 
-<figure>
-<Image img={imgStep08} alt=""/>
-</figure>
+![Configure advanced options](../../assets/mongodb-08.png)
 
-### 9. Completion
+### Completion
 
 Click the **Submit** button to complete the creation of the data synchronization task from MongoDB to TDengine, and return to the **Data Source List** page to view the task execution status.

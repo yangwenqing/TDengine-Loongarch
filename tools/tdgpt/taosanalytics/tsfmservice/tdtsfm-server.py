@@ -1,7 +1,12 @@
 
+import argparse
 import torch
 from torch import nn
 import torch.nn.functional as F
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
 
 from transformers import PreTrainedModel, Cache, DynamicCache
 from transformers.activations import ACT2FN
@@ -14,7 +19,7 @@ from transformers.generation import validate_stopping_criteria, EosTokenCriteria
 from transformers.generation.utils import GenerateNonBeamOutput, GenerateEncoderDecoderOutput, GenerateDecoderOnlyOutput, GenerationConfig, GenerateOutput
 from transformers.utils import ModelOutput
 from flask import Flask, request, jsonify
-import argparse
+from taosanalytics.conf import Configure
 
 app = Flask(__name__)
 
@@ -663,6 +668,11 @@ class TaosForPrediction(TaosPreTrainedModel, TaosTSGenerationMixin):
 
 
 def init_model():
+    global Taos_model
+
+    conf = Configure()
+    model_dir = conf.get_model_directory()
+    weight_path = f"{model_dir}/tdtsfm/taos.pth"
 
     config = TaosConfig(
         Taos_input_token_len=96,
@@ -677,14 +687,11 @@ def init_model():
     )
 
     Taos_model = TaosForPrediction(config)
-    weight_path = "taos.pth"
     state_dict = torch.load(weight_path, map_location=torch.device('cpu'))
 
     # convert model weight
     Taos_model.load_state_dict(state_dict, strict=True)
     Taos_model = Taos_model.to(device)
-
-    # return Taos_model
 
 @app.route('/tdtsfm', methods=['POST'])
 def ds_predict():
@@ -709,6 +716,11 @@ def ds_predict():
             # for identical array list, std is 0, return directly
             pred_y = [input_data[0] for _ in range(num_len)]
         else:
+            if Taos_model is None:
+                return jsonify({
+                    'error': f'not predict, load model failed'
+                }), 500
+
             seqs = torch.tensor(input_data).unsqueeze(0).float().to(device)
 
             # 禁用梯度并生成预测
@@ -718,7 +730,6 @@ def ds_predict():
 
             print(f"pred result is:({pred_y})")
             pred_y = pred_y[0].tolist()
-
         response = {
             'status': 'success',
             'output': pred_y[-num_len:]
@@ -732,11 +743,24 @@ def ds_predict():
 
 
 def main():
+    # Extract --port from argv so the port can be driven by configuration
+    _port = 6061
+    _new_argv = [sys.argv[0]]
+    _i = 1
+    while _i < len(sys.argv):
+        if sys.argv[_i] == '--port' and _i + 1 < len(sys.argv):
+            _port = int(sys.argv[_i + 1])
+            _i += 2
+        else:
+            _new_argv.append(sys.argv[_i])
+            _i += 1
+    sys.argv = _new_argv
+
     init_model()
 
     app.run(
         host='0.0.0.0',
-        port=5000,
+        port=_port,
         threaded=True,
         debug=False
     )

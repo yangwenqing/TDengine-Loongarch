@@ -31,6 +31,7 @@
 #include "trpc.h"
 #include "tmisce.h"
 #include "tversion.h"
+#include "dmUtil.h"
 // clang-format on
 
 #define UDFD_MAX_SCRIPT_PLUGINS 64
@@ -45,7 +46,6 @@ typedef struct SUdfCPluginCtx {
   TUdfAggStartFunc   aggStartFunc;
   TUdfAggProcessFunc aggProcFunc;
   TUdfAggFinishFunc  aggFinishFunc;
-  TUdfAggMergeFunc   aggMergeFunc;
 
   TUdfInitFunc    initFunc;
   TUdfDestroyFunc destroyFunc;
@@ -85,13 +85,6 @@ int32_t udfdCPluginUdfInitLoadAggFuncs(SUdfCPluginCtx *udfCtx, const char *udfNa
   snprintf(finishFuncName, sizeof(finishFuncName), "%s%s", processFuncName, finishSuffix);
   TAOS_CHECK_RETURN(uv_dlsym(&udfCtx->lib, finishFuncName, (void **)(&udfCtx->aggFinishFunc)));
 
-  char  mergeFuncName[TSDB_FUNC_NAME_LEN + 7] = {0};
-  char *mergeSuffix = "_merge";
-  snprintf(mergeFuncName, sizeof(mergeFuncName), "%s%s", processFuncName, mergeSuffix);
-  int ret = uv_dlsym(&udfCtx->lib, mergeFuncName, (void **)(&udfCtx->aggMergeFunc));
-  if (ret != 0) {
-    fnInfo("uv_dlsym function %s. error: %s", mergeFuncName, uv_strerror(ret));
-  }
   return 0;
 }
 
@@ -390,6 +383,13 @@ int32_t udfdInitializeCPlugin(SUdfScriptPlugin *plugin) {
 
 int32_t udfdLoadSharedLib(char *libPath, uv_lib_t *pLib, const char *funcName[], void **func[], int numOfFuncs) {
   TAOS_UDF_CHECK_PTR_RCODE(libPath, pLib, funcName, func);
+
+#if !defined(WINDOWS)
+  if (strchr(libPath, '/') == NULL) {
+    fnDebug("udf plugin load by soname: %s", libPath);
+  }
+#endif
+
   int err = uv_dlopen(libPath, pLib);
   if (err != 0) {
     fnError("can not load library %s. error: %s, %s", libPath, uv_strerror(err), pLib->errmsg);
@@ -402,14 +402,237 @@ int32_t udfdLoadSharedLib(char *libPath, uv_lib_t *pLib, const char *funcName[],
       fnError("load library function failed. lib %s function %s", libPath, funcName[i]);
     }
   }
+
+  fnDebug("udf plugin loaded: %s", libPath);
   return 0;
 }
+
+// ---------------------------------------------------------------------------
+// Linux/macOS: Pre-load libpython with RTLD_GLOBAL so taospyudf can resolve
+// Python symbols at load time.
+// ---------------------------------------------------------------------------
+#if !defined(WINDOWS)
+
+static void *udfdPythonLibHandle = NULL;
+
+static void udfdPreloadPythonLibrary(void) {
+  // 1. If PYTHONHOME is set, look there first
+  char pythonHome[PATH_MAX] = {0};
+  bool hasPythonHome = (taosGetEnv("PYTHONHOME", pythonHome, sizeof(pythonHome)) > 0);
+
+  // Try versions from newest to oldest
+  static const char *pyVersions[] = {
+      "3.15", "3.14", "3.13", "3.12", "3.11", "3.10", "3.9", NULL};
+
+  char libPath[PATH_MAX] = {0};
+
+  // 0. If udfdLdLibPath is configured, try absolute paths first.
+  if (tsUdfdLdLibPath[0] != '\0') {
+    char pathList[sizeof(tsUdfdLdLibPath)] = {0};
+    tstrncpy(pathList, tsUdfdLdLibPath, sizeof(pathList));
+
+    char *saveptr = NULL;
+    char *dir = strtok_r(pathList, ":", &saveptr);
+    while (dir != NULL) {
+      if (dir[0] != '\0') {
+        for (int v = 0; pyVersions[v] != NULL; v++) {
+#ifdef _TD_DARWIN_64
+          snprintf(libPath, sizeof(libPath), "%s/libpython%s.dylib", dir, pyVersions[v]);
+          udfdPythonLibHandle = taosLoadDllGlobal(libPath);
+          if (udfdPythonLibHandle) {
+            fnInfo("udf python: pre-loaded %s (from udfdLdLibPath)", libPath);
+            return;
+          }
+#else
+          snprintf(libPath, sizeof(libPath), "%s/libpython%s.so.1.0", dir, pyVersions[v]);
+          udfdPythonLibHandle = taosLoadDllGlobal(libPath);
+          if (udfdPythonLibHandle) {
+            fnInfo("udf python: pre-loaded %s (from udfdLdLibPath)", libPath);
+            return;
+          }
+          snprintf(libPath, sizeof(libPath), "%s/libpython%s.so", dir, pyVersions[v]);
+          udfdPythonLibHandle = taosLoadDllGlobal(libPath);
+          if (udfdPythonLibHandle) {
+            fnInfo("udf python: pre-loaded %s (from udfdLdLibPath)", libPath);
+            return;
+          }
+#endif
+        }
+      }
+      dir = strtok_r(NULL, ":", &saveptr);
+    }
+  }
+
+  for (int v = 0; pyVersions[v] != NULL; v++) {
+    // Try PYTHONHOME first, then system library paths.
+    if (hasPythonHome) {
+#ifdef _TD_DARWIN_64
+      snprintf(libPath, sizeof(libPath), "%s/lib/libpython%s.dylib", pythonHome, pyVersions[v]);
+      udfdPythonLibHandle = taosLoadDllGlobal(libPath);
+      if (udfdPythonLibHandle) {
+        fnInfo("udf python: pre-loaded %s (from PYTHONHOME)", libPath);
+        return;
+      }
+#else
+      snprintf(libPath, sizeof(libPath), "%s/lib/libpython%s.so.1.0", pythonHome, pyVersions[v]);
+      udfdPythonLibHandle = taosLoadDllGlobal(libPath);
+      if (udfdPythonLibHandle) {
+        fnInfo("udf python: pre-loaded %s (from PYTHONHOME)", libPath);
+        return;
+      }
+      snprintf(libPath, sizeof(libPath), "%s/lib/libpython%s.so", pythonHome, pyVersions[v]);
+      udfdPythonLibHandle = taosLoadDllGlobal(libPath);
+      if (udfdPythonLibHandle) {
+        fnInfo("udf python: pre-loaded %s (from PYTHONHOME)", libPath);
+        return;
+      }
+#endif
+    }
+
+    // Try system library paths
+#ifdef _TD_DARWIN_64
+    snprintf(libPath, sizeof(libPath), "libpython%s.dylib", pyVersions[v]);
+    udfdPythonLibHandle = taosLoadDllGlobal(libPath);
+    if (udfdPythonLibHandle) {
+      fnInfo("udf python: pre-loaded %s (from system path)", libPath);
+      return;
+    }
+#else
+    snprintf(libPath, sizeof(libPath), "libpython%s.so.1.0", pyVersions[v]);
+    udfdPythonLibHandle = taosLoadDllGlobal(libPath);
+    if (udfdPythonLibHandle) {
+      fnInfo("udf python: pre-loaded %s (from system path)", libPath);
+      return;
+    }
+    snprintf(libPath, sizeof(libPath), "libpython%s.so", pyVersions[v]);
+    udfdPythonLibHandle = taosLoadDllGlobal(libPath);
+    if (udfdPythonLibHandle) {
+      fnInfo("udf python: pre-loaded %s (from system path)", libPath);
+      return;
+    }
+#endif
+  }
+
+  fnError("udf python: FAILED to pre-load libpython3.XX runtime library. "
+          "Python UDF will not work. "
+          "Install python3 development package: "
+          "apt install python3-dev (Debian/Ubuntu) or yum install python3-devel (RHEL/CentOS). "
+      "Searched udfdLdLibPath='%s', PYTHONHOME='%s' and system library paths for Python 3.9-3.15.",
+      tsUdfdLdLibPath[0] != '\0' ? tsUdfdLdLibPath : "(not set)",
+      hasPythonHome ? pythonHome : "(not set)");
+}
+#endif  // !WINDOWS
+
+#ifdef WINDOWS
+// On Windows, the embedded Python DLL requires PYTHONHOME to locate the stdlib.
+// If not set, try to infer it from python.exe in PATH.
+// Set PYTHONHOME so the embedded interpreter finds its standard library.
+// Strategy:
+//   1. If PYTHONHOME is already set in the environment, honour it.
+//   2. If the python3XX.dll found by SearchPathA lives next to a real Lib\
+//      directory, use that directory (covers both the system install and the
+//      PBS SDK extract).
+//   3. Query the Windows registry (PythonCore\3.XX\InstallPath) for the
+//      matching minor version — the registry always points to the real
+//      install, bypassing the WindowsApps stub that SearchPathA/python.exe
+//      sometimes picks up first.
+//   4. Give up with a warning.
+static void udfdEnsurePythonHome(const char *pythonDllPath, int pyMinor) {
+  char pythonHome[PATH_MAX] = {0};
+  if (taosGetEnv("PYTHONHOME", pythonHome, sizeof(pythonHome)) > 0) {
+    fnInfo("udf python: PYTHONHOME=%s", pythonHome);
+    return;
+  }
+
+  // ── Try the directory that contains the DLL found by SearchPathA ──
+  if (pythonDllPath != NULL && pythonDllPath[0] != '\0') {
+    tstrncpy(pythonHome, pythonDllPath, PATH_MAX);
+    char *lastSlash = strrchr(pythonHome, '\\');
+    if (lastSlash == NULL) lastSlash = strrchr(pythonHome, '/');
+    if (lastSlash != NULL) {
+      *lastSlash = '\0';
+      // Validate: a real Python tree has Lib\encodings under this dir
+      char probe[PATH_MAX];
+      snprintf(probe, sizeof(probe), "%s\\Lib\\encodings", pythonHome);
+      if (taosCheckExistFile(probe)) {
+        taosSetEnv("PYTHONHOME", pythonHome);
+        fnInfo("udf python: PYTHONHOME inferred from DLL path: %s", pythonHome);
+        return;
+      }
+    }
+  }
+
+  // ── Fall back to the Windows registry ──
+  if (pyMinor > 0) {
+    char subKey[128];
+    snprintf(subKey, sizeof(subKey),
+             "SOFTWARE\\Python\\PythonCore\\3.%d\\InstallPath", pyMinor);
+    HKEY hKey = NULL;
+    // Try HKCU first (per-user install), then HKLM (system-wide)
+    LONG rc = RegOpenKeyExA(HKEY_CURRENT_USER, subKey, 0, KEY_READ, &hKey);
+    if (rc != ERROR_SUCCESS) {
+      rc = RegOpenKeyExA(HKEY_LOCAL_MACHINE, subKey, 0, KEY_READ, &hKey);
+    }
+    if (rc == ERROR_SUCCESS && hKey != NULL) {
+      DWORD size = sizeof(pythonHome);
+      DWORD type = 0;
+      rc = RegQueryValueExA(hKey, NULL, NULL, &type, (LPBYTE)pythonHome, &size);
+      RegCloseKey(hKey);
+      if (rc == ERROR_SUCCESS && type == REG_SZ && pythonHome[0] != '\0') {
+        // Strip trailing backslash if present
+        size_t len = strlen(pythonHome);
+        if (len > 0 && (pythonHome[len - 1] == '\\' || pythonHome[len - 1] == '/')) {
+          pythonHome[len - 1] = '\0';
+        }
+        taosSetEnv("PYTHONHOME", pythonHome);
+        fnInfo("udf python: PYTHONHOME from registry: %s", pythonHome);
+        return;
+      }
+    }
+  }
+
+  fnWarn("udf python: PYTHONHOME not set and could not be inferred. "
+         "Python UDF may fail. Set PYTHONHOME to your Python installation directory.");
+}
+#endif  // WINDOWS
 
 int32_t udfdInitializePythonPlugin(SUdfScriptPlugin *plugin) {
   TAOS_UDF_CHECK_PTR_RCODE(plugin);
   plugin->scriptType = TSDB_FUNC_SCRIPT_PYTHON;
-  // todo: windows support
+#ifdef WINDOWS
+  // Detect installed Python and derive PYTHONHOME, then load a single taospyudf.dll.
+  {
+    static const int minors[] = {15, 14, 13, 12, 11, 10, 9};
+    bool             found = false;
+    for (int i = 0; i < (int)(sizeof(minors) / sizeof(minors[0])); i++) {
+      char dllName[64];
+      snprintf(dllName, sizeof(dllName), "python3%d.dll", minors[i]);
+      char path[PATH_MAX];
+      if (SearchPathA(NULL, dllName, NULL, sizeof(path), path, NULL) > 0) {
+        // Found python3XX.dll → derive PYTHONHOME from its real location.
+        udfdEnsurePythonHome(path, minors[i]);
+        fnInfo("udf python: detected %s", dllName);
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      fnError("udf python: no python3XX.dll (3.15–3.9) found in PATH. "
+              "Install Python 3.10–3.15 and add it to PATH.");
+      return TSDB_CODE_UDF_LOAD_UDF_FAILURE;
+    }
+    snprintf(plugin->libPath, PATH_MAX, "%s", "taospyudf.dll");
+    fnInfo("udf python: single-library mode, plugin=%s", plugin->libPath);
+  }
+#elif defined(_TD_DARWIN_64)
+  udfdPreloadPythonLibrary();
+  snprintf(plugin->libPath, PATH_MAX, "%s", "libtaospyudf.dylib");
+  fnInfo("udf python: single-library mode, plugin=%s", plugin->libPath);
+#else
+  udfdPreloadPythonLibrary();
   snprintf(plugin->libPath, PATH_MAX, "%s", "libtaospyudf.so");
+  fnInfo("udf python: single-library mode, plugin=%s", plugin->libPath);
+#endif
   plugin->libLoaded = false;
   const char *funcName[UDFD_MAX_PLUGIN_FUNCS] = {"pyOpen",         "pyClose",         "pyUdfInit",
                                                  "pyUdfDestroy",   "pyUdfScalarProc", "pyUdfAggStart",
@@ -420,9 +643,19 @@ int32_t udfdInitializePythonPlugin(SUdfScriptPlugin *plugin) {
            (void **)&plugin->udfAggFinishFunc, (void **)&plugin->udfAggProcFunc,    (void **)&plugin->udfAggMergeFunc};
   int32_t err = udfdLoadSharedLib(plugin->libPath, &plugin->lib, funcName, funcs, UDFD_MAX_PLUGIN_FUNCS);
   if (err != 0) {
-    fnError("can not load python plugin. lib path %s", plugin->libPath);
+    fnError("udf python: FAILED to load plugin library '%s'", plugin->libPath);
+#ifdef WINDOWS
+    fnError("udf python: possible causes: Python not in PATH / python3XX.dll not found / taospyudf.dll missing.");
+#else
+    fnError("udf python: possible causes: missing libpython3.XX.so (install python3-dev/python3-devel) or missing libtaospyudf.so/.dylib in loader path.");
+#endif
     return err;
   }
+
+  fnDebug("udf python: plugin symbols loaded. open=%p close=%p udfInit=%p udfDestroy=%p scalar=%p aggStart=%p aggProc=%p aggFinish=%p aggMerge=%p",
+          (void *)plugin->openFunc, (void *)plugin->closeFunc, (void *)plugin->udfInitFunc,
+          (void *)plugin->udfDestroyFunc, (void *)plugin->udfScalarProcFunc, (void *)plugin->udfAggStartFunc,
+          (void *)plugin->udfAggProcFunc, (void *)plugin->udfAggFinishFunc, (void *)plugin->udfAggMergeFunc);
 
   if (plugin->openFunc) {
     int16_t lenPythonPath =
@@ -438,7 +671,18 @@ int32_t udfdInitializePythonPlugin(SUdfScriptPlugin *plugin) {
     snprintf(pythonPath, lenPythonPath, "%s:%s", global.udfDataDir, tsUdfdLdLibPath);
 #endif
     SScriptUdfEnvItem items[] = {{"PYTHONPATH", pythonPath}, {"LOGDIR", tsLogDir}};
+
+    int64_t openStartMs = taosGetTimestampMs();
+    fnDebug("udf python: calling plugin open, PYTHONPATH='%s', LOGDIR='%s'", pythonPath, tsLogDir);
     err = plugin->openFunc(items, 2);
+    int64_t openCostMs = taosGetTimestampMs() - openStartMs;
+    if (err == 0) {
+      fnInfo("udf python: plugin open succeeded for %s, cost=%" PRId64 "ms", plugin->libPath, openCostMs);
+    } else {
+      fnError("udf python: plugin open failed for %s, err=%d, cost=%" PRId64
+              "ms. check taospyudf.log under LOGDIR.",
+              plugin->libPath, err, openCostMs);
+    }
     taosMemoryFree(pythonPath);
   }
   if (err != 0) {
@@ -598,11 +842,15 @@ static void convertUdf2UdfInfo(SUdf *udf, SScriptUdfInfo *udfInfo) {
 static int32_t udfdInitUdf(char *udfName, SUdf *udf) {
   TAOS_UDF_CHECK_PTR_RCODE(udfName, udf);
   int32_t err = 0;
+  fnDebug("udf init begin. name=%s", udfName);
   err = udfdFillUdfInfoFromMNode(global.clientRpc, udfName, udf);
   if (err != 0) {
     fnError("can not retrieve udf from mnode. udf name %s", udfName);
     return TSDB_CODE_UDF_LOAD_UDF_FAILURE;
   }
+    fnDebug("udf init metadata. name=%s version=%d created=%" PRIx64 " scriptType=%d funcType=%d path=%s outType=%d outLen=%d bufSize=%d",
+      udf->name, udf->version, udf->createdTime, udf->scriptType, udf->funcType, udf->path,
+      udf->outputType, udf->outputLen, udf->bufSize);
   if (udf->scriptType > UDFD_MAX_SCRIPT_TYPE) {
     fnError("udf name %s script type %d not supported", udfName, udf->scriptType);
     return TSDB_CODE_UDF_SCRIPT_NOT_SUPPORTED;
@@ -623,6 +871,8 @@ static int32_t udfdInitUdf(char *udfName, SUdf *udf) {
 
   SScriptUdfInfo info = {0};
   convertUdf2UdfInfo(udf, &info);
+    fnDebug("udf init call script plugin udfInitFunc. name=%s scriptType=%d udfPath=%s", info.name, info.scriptType,
+      info.path);
   err = udf->scriptPlugin->udfInitFunc(&info, &udf->scriptUdfCtx);
   if (err != 0) {
     fnError("udf name %s init failed. error %d", udfName, err);
@@ -657,6 +907,9 @@ int32_t udfdNewUdf(SUdf **pUdf, const char *udfName) {
     }
   }
   *pUdf =  udfNew;
+
+  fnTrace("udf new succeeded. name %s(%p)", udfNew->name, udfNew);
+
   return 0;
 }
 
@@ -674,6 +927,9 @@ void udfdFreeUdf(void *pData) {
 
   uv_mutex_destroy(&pSudf->lock);
   uv_cond_destroy(&pSudf->condReady);
+
+  fnTrace("udf free succeeded. name %s(%p)", pSudf->name, pSudf);
+
   taosMemoryFree(pSudf);
 }
 
@@ -731,29 +987,41 @@ void udfdProcessSetupRequest(SUvUdfWork *uvUdf, SUdfRequest *request) {
     fnError("udfdGetOrCreateUdf failed. udf name %s", setup->udfName);
     goto _send;
   }
+  fnDebug("setup request got udf object. name=%s ptr=%p refCount=%d state=%d", udf->name, (void*)udf, udf->refCount,
+          udf->state);
   uv_mutex_lock(&udf->lock);
   if (udf->state == UDF_STATE_INIT) {
+    fnDebug("setup request init udf now. name=%s", udf->name);
     udf->state = UDF_STATE_LOADING;
     code = udfdInitUdf(setup->udfName, udf);
     if (code == 0) {
       udf->state = UDF_STATE_READY;
+      fnDebug("setup request init udf done. name=%s state=READY", udf->name);
     } else {
       udf->state = UDF_STATE_INIT;
+      fnError("setup request init udf failed. name=%s code=%d", udf->name, code);
     }
     uv_cond_broadcast(&udf->condReady);
     uv_mutex_unlock(&udf->lock);
   } else {
+    fnDebug("setup request wait for udf loading. name=%s state=%d", udf->name, udf->state);
     while (udf->state == UDF_STATE_LOADING) {
       uv_cond_wait(&udf->condReady, &udf->lock);
     }
+    fnDebug("setup request wait done. name=%s state=%d", udf->name, udf->state);
     uv_mutex_unlock(&udf->lock);
   }
-  SUdfcFuncHandle *handle = taosMemoryMalloc(sizeof(SUdfcFuncHandle));
-  if(handle == NULL) {
-    fnError("udfdProcessSetupRequest: malloc failed.");
-    code = terrno;
+
+  SUdfcFuncHandle *handle = NULL;
+  if (!code) {
+    handle = taosMemoryMalloc(sizeof(SUdfcFuncHandle));
+    if (handle == NULL) {
+      fnError("udfdProcessSetupRequest: malloc failed.");
+      code = terrno;
+    } else {
+      handle->udf = udf;
+    }
   }
-  handle->udf = udf;
 
 _send:
   ;
@@ -769,25 +1037,42 @@ _send:
   int32_t len = encodeUdfResponse(NULL, &rsp);
   if(len < 0) {
     fnError("udfdProcessSetupRequest: encode udf response failed. len %d", len);
-    return;
+    code = terrno;
+    goto _exit;
   }
   rsp.msgLen = len;
   void *bufBegin = taosMemoryMalloc(len);
   if(bufBegin == NULL) {
     fnError("udfdProcessSetupRequest: malloc failed. len %d", len);
-    return;
+    code = terrno;
+    goto _exit;
   }
+
   void *buf = bufBegin;
   if(encodeUdfResponse(&buf, &rsp) < 0) {
     fnError("udfdProcessSetupRequest: encode udf response failed. len %d", len);
     taosMemoryFree(bufBegin);
-    return;
+    code = terrno;
+    goto _exit;
   }
   
   uvUdf->output = uv_buf_init(bufBegin, len);
 
   taosMemoryFreeClear(uvUdf->input.base);
-  return;
+
+_exit:
+  if (code) {
+    uv_mutex_lock(&global.udfsMutex);
+    int32_t removeCode = taosHashRemove(global.udfsHash, udf->name, strlen(udf->name));
+    if (removeCode) {
+      fnError("udf name %s remove from hash failed/setup, err:%0x %s", udf->name, removeCode, tstrerror(removeCode));
+    }
+    uv_mutex_unlock(&global.udfsMutex);
+
+    fnError("udf free: setup failed. name %s(%p) err:%0x %s", udf->name, udf, code, tstrerror(code));
+
+    udfdFreeUdf(udf);
+  }
 }
 
 static int32_t checkUDFScalaResult(SSDataBlock *block, SUdfColumn *output) {
@@ -999,11 +1284,8 @@ void udfdProcessTeardownRequest(SUvUdfWork *uvUdf, SUdfRequest *request) {
   uv_mutex_unlock(&global.udfsMutex);
   if (unloadUdf) {
     fnInfo("udf teardown. udf name: %s type %d: context %p", udf->name, udf->scriptType, (void *)(udf->scriptUdfCtx));
-    uv_cond_destroy(&udf->condReady);
-    uv_mutex_destroy(&udf->lock);
-    code = udf->scriptPlugin->udfDestroyFunc(udf->scriptUdfCtx);
-    fnDebug("udfd destroy function returns %d", code);
-    taosMemoryFree(udf);
+
+    udfdFreeUdf(udf);
   }
 
 _send:
@@ -1040,22 +1322,22 @@ void udfdGetFuncBodyPath(const SUdf *udf, char *path) {
   TAOS_UDF_CHECK_PTR_RVOID(udf, path);
   if (udf->scriptType == TSDB_FUNC_SCRIPT_BIN_LIB) {
 #ifdef WINDOWS
-    snprintf(path, PATH_MAX, "%s%s_%d_%" PRIx64 ".dll", global.udfDataDir, udf->name, udf->version, udf->createdTime);
+    snprintf(path, PATH_MAX, "%s" TD_DIRSEP "%s_%d_%" PRIx64 ".dll", global.udfDataDir, udf->name, udf->version,
+             udf->createdTime);
 #else
-    snprintf(path, PATH_MAX, "%s/lib%s_%d_%" PRIx64 ".so", global.udfDataDir, udf->name, udf->version,
+    snprintf(path, PATH_MAX, "%s" TD_DIRSEP "lib%s_%d_%" PRIx64 ".so", global.udfDataDir, udf->name, udf->version,
              udf->createdTime);
 #endif
   } else if (udf->scriptType == TSDB_FUNC_SCRIPT_PYTHON) {
-#ifdef WINDOWS
-    snprintf(path, PATH_MAX, "%s%s_%d_%" PRIx64 ".py", global.udfDataDir, udf->name, udf->version, udf->createdTime);
-#else
-    snprintf(path, PATH_MAX, "%s/%s_%d_%" PRIx64 ".py", global.udfDataDir, udf->name, udf->version, udf->createdTime);
-#endif
+    snprintf(path, PATH_MAX, "%s" TD_DIRSEP "%s_%d_%" PRIx64 ".py", global.udfDataDir, udf->name, udf->version,
+             udf->createdTime);
   } else {
 #ifdef WINDOWS
-    snprintf(path, PATH_MAX, "%s%s_%d_%" PRIx64, global.udfDataDir, udf->name, udf->version, udf->createdTime);
+    snprintf(path, PATH_MAX, "%s" TD_DIRSEP "%s_%d_%" PRIx64, global.udfDataDir, udf->name, udf->version,
+             udf->createdTime);
 #else
-    snprintf(path, PATH_MAX, "%s/lib%s_%d_%" PRIx64, global.udfDataDir, udf->name, udf->version, udf->createdTime);
+    snprintf(path, PATH_MAX, "%s" TD_DIRSEP "lib%s_%d_%" PRIx64, global.udfDataDir, udf->name, udf->version,
+             udf->createdTime);
 #endif
   }
 }
@@ -1294,7 +1576,16 @@ int32_t udfdOpenClientRpc() {
   connLimitNum = TMIN(connLimitNum, 500);
   rpcInit.connLimitNum = connLimitNum;
   rpcInit.timeToGetConn = tsTimeToGetAvailableConn;
+
+  rpcInit.enableSSL = tsEnableTLS;
+  rpcInit.enableSasl = tsEnableSasl;
+  memcpy(rpcInit.caPath, tsTLSCaPath, strlen(tsTLSCaPath));
+  memcpy(rpcInit.certPath, tsTLSSvrCertPath, strlen(tsTLSSvrCertPath));
+  memcpy(rpcInit.keyPath, tsTLSSvrKeyPath, strlen(tsTLSSvrKeyPath));
+  memcpy(rpcInit.cliCertPath, tsTLSCliCertPath, strlen(tsTLSCliCertPath));
+  memcpy(rpcInit.cliKeyPath, tsTLSCliKeyPath, strlen(tsTLSCliKeyPath));
   TAOS_CHECK_RETURN(taosVersionStrToInt(td_version, &rpcInit.compatibilityVer));
+
   global.clientRpc = rpcOpen(&rpcInit);
   if (global.clientRpc == NULL) {
     fnError("failed to init dnode rpc client");
@@ -1606,7 +1897,9 @@ static int32_t udfdUvInit() {
   TAOS_CHECK_RETURN(uv_loop_init(global.loop));
 
   if (tsStartUdfd) {  // udfd is started by taosd, which shall exit when taosd exit
-    TAOS_CHECK_RETURN(uv_pipe_init(global.loop, &global.ctrlPipe, 1));
+    // ipc=0 — see tudf.c counterpart. Control pipe is used only for
+    // parent-death EOF; ipc=1 fails uv_pipe_open on Windows.
+    TAOS_CHECK_RETURN(uv_pipe_init(global.loop, &global.ctrlPipe, 0));
     TAOS_CHECK_RETURN(uv_pipe_open(&global.ctrlPipe, 0));
     TAOS_CHECK_RETURN(uv_read_start((uv_stream_t *)&global.ctrlPipe, udfdCtrlAllocBufCb, udfdCtrlReadCb));
   }
@@ -1762,6 +2055,7 @@ int main(int argc, char *argv[]) {
   bool residentFuncsInited = false;
   bool udfSourceDirInited = false;
   bool globalDataInited = false;
+  taosSetSkipKeyCheckMode();
 
   if (!taosCheckSystemIsLittleEnd()) {
     (void)printf("failed to start since on non-little-end machines\n");
@@ -1785,9 +2079,23 @@ int main(int argc, char *argv[]) {
     logInitialized = true;  // log is initialized
   }
 
-  if (taosInitCfg(configDir, NULL, NULL, NULL, NULL, 0) != 0) {
-    fnError("failed to start since read config error");
-    code = -2;
+  if ((code = taosPreLoadCfg(configDir, NULL, NULL, NULL, NULL, 0)) != 0) {
+    fnError("failed to start since pre load config error");
+    goto _exit;
+  }
+
+  if ((code = dmGetEncryptKey()) != 0) {
+    fnError("failed to start since failed to get encrypt key");
+    goto _exit;
+  }
+
+  if ((code = tryLoadCfgFromDataDir(tsCfg)) != 0) {
+    fnError("failed to start since try load config from data dir error");
+    goto _exit;
+  }
+
+  if ((code = taosApplyCfg(configDir, NULL, NULL, NULL, NULL, 0)) != 0) {
+    fnError("failed to start since apply config error");
     goto _exit;
   }
   cfgInitialized = true;  // cfg is initialized

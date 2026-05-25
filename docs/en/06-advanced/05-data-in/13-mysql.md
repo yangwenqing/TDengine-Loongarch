@@ -1,19 +1,8 @@
 ---
 title: MySQL
-slug: /advanced-features/data-connectors/mysql
 ---
 
-import Image from '@theme/IdealImage';
-import imgStep01 from '../../assets/mysql-01.png';
-import imgStep02 from '../../assets/mysql-02.png';
-import imgStep03 from '../../assets/mysql-03.png';
-import imgStep04 from '../../assets/mysql-04.png';
-import imgStep05 from '../../assets/mysql-05.png';
-import imgStep06 from '../../assets/mysql-06.png';
-import imgStep07 from '../../assets/mysql-07.png';
-import imgStep08 from '../../assets/mysql-08.png';
-
-import Enterprise from '../../assets/resources/_enterprise.mdx';
+import { AddDataSource, Enterprise } from '../../assets/resources/_resources.mdx';
 
 <Enterprise/>
 
@@ -21,64 +10,40 @@ This section describes how to create data migration tasks through the Explorer i
 
 ## Overview
 
-MySQL is one of the most popular relational databases. Many systems have used or are using MySQL databases to store data reported by IoT and industrial internet devices. However, as the number of devices in the access systems grows and the demand for real-time data feedback from users increases, MySQL can no longer meet business needs. Starting from TDengine Enterprise Edition 3.3.0.0, TDengine can efficiently read data from MySQL and write it into TDengine, achieving historical data migration or real-time data synchronization, and solving the technical pain points faced by businesses.
+MySQL is one of the most popular relational databases. Many systems have used or are using MySQL databases to store data reported by IoT and industrial internet devices. However, as the number of devices in the access systems grows and the demand for real-time data feedback from users increases, MySQL can no longer meet business needs. TDengine TSDB-Enterprise can efficiently read data from MySQL and write it into TDengine, achieving historical data migration or real-time data synchronization, and solving the technical pain points faced by businesses.
 
-## Creating a Task
+## Procedure
 
-### 1. Add a Data Source
+### Add a Data Source
 
-Click the **+ Add Data Source** button in the top left corner of the data writing page to enter the Add Data Source page, as shown below:
+<AddDataSource connectorName="MySQL"/>
 
-<figure>
-<Image img={imgStep01} alt=""/>
-</figure>
-
-### 2. Configure Basic Information
-
-Enter the task name in the **Name** field, for example *`test_mysql_01`*.
-
-Select *`MySQL`* from the **Type** dropdown menu, as shown below (the fields on the page will change after selection).
-
-**Proxy** is optional. If needed, you can select a specific proxy from the dropdown menu, or click the **+ Create New Proxy** button on the right to create a new proxy.
-
-**Target Database** is required. You can click the **+ Create Database** button on the right to create a new database.
-
-<figure>
-<Image img={imgStep02} alt=""/>
-</figure>
-
-### 3. Configure Connection Information
+### Configure Connection Information
 
 Fill in the *`connection information for the source MySQL database`* in the **Connection Configuration** area, as shown below:
 
-<figure>
-<Image img={imgStep03} alt=""/>
-</figure>
+![Configure connection information](../../assets/mysql-03.png)
 
-### 4. Configure Authentication Information
+### Configure Authentication Information
 
 **User** Enter the user of the source MySQL database, who must have read permissions in the organization.
 
 **Password** Enter the login password for the user mentioned above in the source MySQL database.
 
-<figure>
-<Image img={imgStep04} alt=""/>
-</figure>
+![Configure authentication information](../../assets/mysql-04.png)
 
-### 5. Configure Connection Options
+### Configure Connection Options
 
 **Character Set** Set the character set for the connection. The default character set is utf8mb4. MySQL 5.5.3 supports this feature. If connecting to an older version, it is recommended to change to utf8.
 Options include utf8, utf8mb4, utf16, utf32, gbk, big5, latin1, ascii.
 
 **SSL Mode** Set whether to negotiate a secure SSL TCP/IP connection with the server or the priority of negotiation. The default value is PREFERRED. Options include DISABLED, PREFERRED, REQUIRED.
 
-<figure>
-<Image img={imgStep05} alt=""/>
-</figure>
+![Configure character set and SSL mode](../../assets/mysql-05.png)
 
 Then click the **Check Connectivity** button, where users can click this button to check if the information filled in above can normally fetch data from the source MySQL database.
 
-### 6. Configure SQL Query
+### Configure SQL Query
 
 **Subtable Field** is used to split subtables, it is a select distinct SQL statement that queries non-repeated items of specified field combinations, usually corresponding to the tag in transform:
 > This configuration is mainly to solve the problem of data migration disorder, and it needs to be used together with **SQL Template**, otherwise it cannot achieve the expected effect, usage examples are as follows:
@@ -104,11 +69,9 @@ Then click the **Check Connectivity** button, where users can click this button 
 
 **Delay Duration** In real-time data synchronization scenarios, to avoid losing data due to delayed writes, each synchronization task will read data from before the delay duration.
 
-<figure>
-<Image img={imgStep06} alt=""/>
-</figure>
+![Configure data collection](../../assets/mysql-06.png)
 
-### 7. Configure Data Mapping
+### Configure Data Mapping
 
 In the **Data Mapping** area, fill in the configuration parameters related to data mapping.
 
@@ -122,11 +85,9 @@ In **Mapping**, select the supertable in TDengine to map to, and the columns to 
 
 Click **Preview** to view the results of the mapping.
 
-<figure>
-<Image img={imgStep07} alt=""/>
-</figure>
+![Configure data mapping](../../assets/mysql-07.png)
 
-### 8. Configure Advanced Options
+### Configure Advanced Options
 
 The **Advanced Options** area is collapsed by default, click the `>` on the right to expand it, as shown below:
 
@@ -134,10 +95,8 @@ The **Advanced Options** area is collapsed by default, click the `>` on the righ
 
 **Batch Size** The maximum number of messages or rows sent at once. The default is 10000.
 
-<figure>
-<Image img={imgStep08} alt=""/>
-</figure>
+![Configure advanced options](../../assets/mysql-08.png)
 
-### 9. Completion
+### Completion
 
 Click the **Submit** button to complete the creation of the data synchronization task from MySQL to TDengine, and return to the **Data Source List** page to view the task execution status.

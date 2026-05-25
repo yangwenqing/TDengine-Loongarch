@@ -31,7 +31,7 @@
   do {                                                                    \
     T* plist = (T*)pCol->pData;                                           \
     for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) { \
-      if (colDataIsNull_f(pCol->nullbitmap, i)) {                         \
+      if (colDataIsNull_f(pCol, i)) {                         \
         continue;                                                         \
       }                                                                   \
                                                                           \
@@ -156,7 +156,7 @@ static int32_t doAddNumericVector(SColumnInfoData* pCol, int32_t type, SInputCol
     case TSDB_DATA_TYPE_TINYINT: {
       int8_t* plist = (int8_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + start; ++i) {
-        if (colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -171,7 +171,7 @@ static int32_t doAddNumericVector(SColumnInfoData* pCol, int32_t type, SInputCol
     case TSDB_DATA_TYPE_SMALLINT: {
       int16_t* plist = (int16_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + start; ++i) {
-        if (colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -185,7 +185,7 @@ static int32_t doAddNumericVector(SColumnInfoData* pCol, int32_t type, SInputCol
     case TSDB_DATA_TYPE_INT: {
       int32_t* plist = (int32_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + start; ++i) {
-        if (colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -200,7 +200,7 @@ static int32_t doAddNumericVector(SColumnInfoData* pCol, int32_t type, SInputCol
     case TSDB_DATA_TYPE_BIGINT: {
       int64_t* plist = (int64_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + start; ++i) {
-        if (colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -214,7 +214,7 @@ static int32_t doAddNumericVector(SColumnInfoData* pCol, int32_t type, SInputCol
     case TSDB_DATA_TYPE_UTINYINT: {
       uint8_t* plist = (uint8_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + start; ++i) {
-        if (colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -229,7 +229,7 @@ static int32_t doAddNumericVector(SColumnInfoData* pCol, int32_t type, SInputCol
     case TSDB_DATA_TYPE_USMALLINT: {
       uint16_t* plist = (uint16_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + start; ++i) {
-        if (colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -243,7 +243,7 @@ static int32_t doAddNumericVector(SColumnInfoData* pCol, int32_t type, SInputCol
     case TSDB_DATA_TYPE_UINT: {
       uint32_t* plist = (uint32_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + start; ++i) {
-        if (colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -258,7 +258,7 @@ static int32_t doAddNumericVector(SColumnInfoData* pCol, int32_t type, SInputCol
     case TSDB_DATA_TYPE_UBIGINT: {
       uint64_t* plist = (uint64_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + start; ++i) {
-        if (colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -273,7 +273,7 @@ static int32_t doAddNumericVector(SColumnInfoData* pCol, int32_t type, SInputCol
     case TSDB_DATA_TYPE_FLOAT: {
       float* plist = (float*)pCol->pData;
       for (int32_t i = start; i < numOfRows + start; ++i) {
-        if (colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -287,7 +287,7 @@ static int32_t doAddNumericVector(SColumnInfoData* pCol, int32_t type, SInputCol
     case TSDB_DATA_TYPE_DOUBLE: {
       double* plist = (double*)pCol->pData;
       for (int32_t i = start; i < numOfRows + start; ++i) {
-        if (colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -301,7 +301,7 @@ static int32_t doAddNumericVector(SColumnInfoData* pCol, int32_t type, SInputCol
     case TSDB_DATA_TYPE_DECIMAL: {
       const char* pDec = pCol->pData;
       for (int32_t i = start; i < numOfRows + start; ++i) {
-        if (colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -511,71 +511,6 @@ int32_t avgFunctionMerge(SqlFunctionCtx* pCtx) {
 
   return TSDB_CODE_SUCCESS;
 }
-
-#ifdef BUILD_NO_CALL
-int32_t avgInvertFunction(SqlFunctionCtx* pCtx) {
-  int32_t numOfElem = 0;
-
-  // Only the pre-computing information loaded and actual data does not loaded
-  SInputColumnInfoData* pInput = &pCtx->input;
-  SAvgRes* pAvgRes = GET_ROWCELL_INTERBUF(GET_RES_INFO(pCtx));
-
-  // computing based on the true data block
-  SColumnInfoData* pCol = pInput->pData[0];
-
-  int32_t start = pInput->startRowIndex;
-  int32_t numOfRows = pInput->numOfRows;
-
-  switch (pCol->info.type) {
-    case TSDB_DATA_TYPE_TINYINT: {
-      LIST_AVG_N(pAvgRes->sum.isum, int8_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_SMALLINT: {
-      LIST_AVG_N(pAvgRes->sum.isum, int16_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_INT: {
-      LIST_AVG_N(pAvgRes->sum.isum, int32_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_BIGINT: {
-      LIST_AVG_N(pAvgRes->sum.isum, int64_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_UTINYINT: {
-      LIST_AVG_N(pAvgRes->sum.usum, uint8_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_USMALLINT: {
-      LIST_AVG_N(pAvgRes->sum.usum, uint16_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_UINT: {
-      LIST_AVG_N(pAvgRes->sum.usum, uint32_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_UBIGINT: {
-      LIST_AVG_N(pAvgRes->sum.usum, uint64_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_FLOAT: {
-      LIST_AVG_N(pAvgRes->sum.dsum, float);
-      break;
-    }
-    case TSDB_DATA_TYPE_DOUBLE: {
-      LIST_AVG_N(pAvgRes->sum.dsum, double);
-      break;
-    }
-    default:
-      break;
-  }
-
-  // data in the check operation are all null, not output
-  SET_VAL(GET_RES_INFO(pCtx), numOfElem, 1);
-  return TSDB_CODE_SUCCESS;
-}
-#endif
 
 int32_t avgCombine(SqlFunctionCtx* pDestCtx, SqlFunctionCtx* pSourceCtx) {
   SResultRowEntryInfo* pDResInfo = GET_RES_INFO(pDestCtx);

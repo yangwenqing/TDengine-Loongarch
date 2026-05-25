@@ -1,7 +1,6 @@
 ---
 sidebar_label: User-Defined Functions
 title: User-Defined Functions (UDF)
-slug: /developer-guide/user-defined-functions
 ---
 
 ## Introduction to UDF
@@ -241,7 +240,7 @@ To better operate the above data structures, some convenience functions are prov
 
 ### C UDF Example Code
 
-#### Scalar Function Example [bit_and](https://github.com/taosdata/TDengine/blob/3.0/tests/script/sh/bit_and.c)
+#### Scalar Function Example
 
 `bit_and` implements the bitwise AND function for multiple columns. If there is only one column, it returns that column. `bit_and` ignores null values.
 
@@ -249,12 +248,12 @@ To better operate the above data structures, some convenience functions are prov
 <summary>bit_and.c</summary>
 
 ```c
-{{#include tests/script/sh/bit_and.c}}
+{{#include docs/examples/udf/bit_and.c}}
 ```
 
 </details>
 
-#### Aggregate Function Example 1 Returning Numeric Type [l2norm](https://github.com/taosdata/TDengine/blob/3.0/tests/script/sh/l2norm.c)
+#### Aggregate Function Example 1: Returning Numeric Type
 
 `l2norm` implements the second-order norm of all data in the input columns, i.e., squaring each data point, then summing them up, and finally taking the square root.
 
@@ -262,104 +261,298 @@ To better operate the above data structures, some convenience functions are prov
 <summary>l2norm.c</summary>
 
 ```c
-{{#include tests/script/sh/l2norm.c}}
+{{#include docs/examples/udf/l2norm.c}}
 ```
 
 </details>
 
-#### Aggregate Function Example 2 Returning String Type [max_vol](https://github.com/taosdata/TDengine/blob/3.0/tests/script/sh/max_vol.c)
+#### Aggregate Function Example 2: Returning String Type
 
 `max_vol` implements finding the maximum voltage from multiple input voltage columns, returning a composite string value consisting of the device ID + the position (row, column) of the maximum voltage + the maximum voltage value.
 
 Create table:
 
-```shell
-create table battery(ts timestamp, vol1 float, vol2 float, vol3 float, deviceId varchar(16));
+```sql
+CREATE TABLE battery(ts TIMESTAMP, vol1 FLOAT, vol2 FLOAT, vol3 FLOAT, deviceId VARCHAR(16));
 ```
 
 Create custom function:
 
-```shell
-create aggregate function max_vol as '/root/udf/libmaxvol.so' outputtype binary(64) bufsize 10240 language 'C'; 
+```sql
+CREATE AGGREGATE FUNCTION max_vol AS '/root/udf/libmaxvol.so' OUTPUTTYPE BINARY(64) BUFSIZE 10240 LANGUAGE 'C'; 
 ```
 
 Use custom function:
 
-```shell
-select max_vol(vol1, vol2, vol3, deviceid) from battery;
+```sql
+SELECT max_vol(vol1, vol2, vol3, deviceid) FROM battery;
 ```
 
 <details>
 <summary>max_vol.c</summary>
 
 ```c
-{{#include tests/script/sh/max_vol.c}}
+{{#include docs/examples/udf/max_vol.c}}
 ```
 
 </details>
 
-#### Aggregate Function Example 3 Split string and calculate average value [extract_avg](https://github.com/taosdata/TDengine/blob/3.0/tests/script/sh/extract_avg.c)
+#### Aggregate Function Example 3: Split String and Calculate Average Value
 
 The `extract_avg` function converts a comma-separated string sequence into a set of numerical values, counts the results of all rows, and calculates the final average. Note when implementing:
+
 - `interBuf->numOfResult` needs to return 1 or 0 and cannot be used for count.
 - Count can use additional caches, such as the `SumCount` structure.
 - Use `varDataVal` to obtain the string.
 
 Create table:
 
-```shell
-create table scores(ts timestamp, varStr varchar(128));
+```sql
+CREATE TABLE scores(ts TIMESTAMP, varStr VARCHAR(128));
 ```
 
 Create custom function:
 
-```shell
-create aggregate function extract_avg as '/root/udf/libextract_avg.so' outputtype double bufsize 16 language 'C'; 
+```sql
+CREATE AGGREGATE FUNCTION extract_avg AS '/root/udf/libextract_avg.so' OUTPUTTYPE DOUBLE BUFSIZE 16 LANGUAGE 'C'; 
 ```
 
 Use custom function:
 
-```shell
-select extract_avg(valStr) from scores;
+```sql
+SELECT extract_avg(valStr) FROM scores;
 ```
 
 Generate `.so` file
+
 ```bash
-gcc -g -O0 -fPIC -shared extract_vag.c -o libextract_avg.so
+gcc -g -O0 -fPIC -shared extract_avg.c -o libextract_avg.so
 ```
 
 <details>
-<summary>max_vol.c</summary>
+<summary>extract_avg.c</summary>
 
 ```c
-{{#include tests/script/sh/max_vol.c}}
+{{#include docs/examples/udf/extract_avg.c}}
 ```
 
 </details>
 
+#### Aggregate Function Example 4: Accumulate All Data Then Compute — Permutation Entropy
+
+Permutation Entropy was proposed by Bandt and Pompe in 2002. It measures the complexity of a time series by analyzing the probability distribution of ordinal patterns and is widely used in fault detection, physiological signal analysis, and related fields.
+
+`perm_entropy` is a **full-accumulation** aggregate function: its algorithm requires all data in the window before computation can begin. Each AGG_PROC call therefore only accumulates data; the entropy is computed in the `perm_entropy_finish` callback. This is fundamentally different from functions like `l2norm` that can be computed incrementally row by row.
+
+This pattern involves **two independent memory layers** whose ownership must be kept clear:
+
+| Memory layer | Owner | Typical variable | Allocated / freed by |
+|---|---|---|---|
+| **Framework container** (fixed size = BUFSIZE) | Framework | `interBuf->buf`, `newInterBuf->buf`, `resultData->buf` | Framework `malloc`s before each callback and frees via `freeUdfInterBuf()` after; UDF may only write into it — **must not replace the pointer** |
+| **UDF heap content** (dynamic size) | UDF | `state->values` (a pointer embedded inside the container) | UDF grows it with `realloc` as needed; `freeUdfInterBuf()` frees only the container and is unaware of inner pointers; UDF **must** free it explicitly in `finish` and on every error path |
+
+Responsibilities of each callback:
+
+- `perm_entropy_start`: zero-initialises a `PermEntropyState` with `memset` into the framework-provided `interBuf->buf`; the `values` pointer is left `NULL` (heap content not yet allocated).
+- `perm_entropy` (AGG_PROC):
+  1. Value-copy the state from `interBuf->buf` into a stack variable `newState`;
+  2. If the current batch has valid rows, extend the UDF heap content (`newState.values`) with `realloc` and append the data;
+  3. `memcpy` `newState` (with the updated `values` pointer) into the framework-preallocated `newInterBuf->buf` — **never** replace `newInterBuf->buf` with a fresh `malloc`, or the BUFSIZE bytes the framework allocated are lost on every AGG_PROC call;
+  4. On `realloc` failure, free the original UDF heap content via `interBuf->buf` and zero the pointer, because `freeUdfInterBuf()` will not follow the inner `values` pointer.
+- `perm_entropy_finish`: compute the permutation entropy from all accumulated data, **free `state->values`**, and write the result into the framework-preallocated `resultData->buf`.
+
+Create tables:
+
+```sql
+-- Plain table for full-table aggregation and time-window queries
+CREATE TABLE vibration (ts TIMESTAMP, val DOUBLE);
+
+-- Super table for per-subtable grouped queries
+CREATE STABLE vibration_stb (ts TIMESTAMP, val DOUBLE) TAGS (device_id INT);
+CREATE TABLE vibration_d1 USING vibration_stb TAGS (1);
+CREATE TABLE vibration_d2 USING vibration_stb TAGS (2);
+```
+
+Generate `.so` file:
+
+```bash
+gcc -g -O0 -fPIC -shared perm_entropy.c -o libperm_entropy.so -lm
+```
+
+Create custom function:
+
+```sql
+CREATE AGGREGATE FUNCTION perm_entropy
+  AS '/path/to/libperm_entropy.so'
+  OUTPUTTYPE DOUBLE
+  BUFSIZE 256;
+```
+
+Use custom function:
+
+```sql
+-- Full-table aggregation: compute permutation entropy over the entire table
+SELECT perm_entropy(val) FROM vibration;
+
+-- Time-window aggregation: compute permutation entropy independently for each window
+SELECT perm_entropy(val) FROM vibration INTERVAL(10s);
+
+-- Grouped by subtable: compute permutation entropy separately for each device
+SELECT perm_entropy(val) FROM vibration_stb PARTITION BY tbname;
+```
+
+<details>
+<summary>perm_entropy.c</summary>
+
+```c
+{{#include docs/examples/udf/perm_entropy.c}}
+```
+
+</details>
 
 ## Developing UDFs in Python Language
 
 ### Environment Setup
 
+Starting from v3.4.1.12, the Python UDF plugin `libtaospyudf.so` (Linux) or `taospyudf.dll` (Windows) is shipped built-in with the TDengine TSDB installation package. No additional installation is required. Just ensure that Python 3 runtime is available on the system.
+
+The `taosudf` process automatically detects and loads the system-installed Python at runtime. No manual environment variable configuration is needed.
+
+#### Linux
+
+On Linux, `libtaospyudf.so` is **not bound to a specific Python version**. `taosudf` automatically detects and pre-loads the system's `libpython3.XX.so` at runtime, so a single binary package is compatible with any Python 3.9–3.15.
+
 The specific steps to prepare the environment are as follows:
 
-- Step 1, prepare the Python runtime environment. If you compile and install Python locally, be sure to enable the `--enable-shared` option, otherwise the subsequent installation of taospyudf will fail due to failure to generate a shared library.
-- Step 2, install the Python package taospyudf. The command is as follows.
+- Step 1, install the Python 3 development package (which includes the `libpython3.XX.so` shared library):
 
-    ```shell
-    pip3 install taospyudf
-    ```
+  ```shell
+  # Ubuntu/Debian
+  apt install python3-dev
+  # CentOS/RHEL
+  yum install python3-devel
+  ```
 
-- Step 3, execute the command ldconfig.
-- Step 4, start the taosd service.
+- Step 2, start the taosd service.
 
-The installation process will compile C++ source code, so cmake and gcc must be present on the system. The compiled libtaospyudf.so file will automatically be copied to the /usr/local/lib/ directory, so if you are not a root user, you need to add sudo during installation. After installation, you can check if this file is in the directory:
+After installing TDengine TSDB, you can verify that `libtaospyudf.so` is properly installed:
 
 ```shell
-root@server11 ~/udf $ ls -l /usr/local/lib/libtaos*
--rw-r--r-- 1 root root 671344 May 24 22:54 /usr/local/lib/libtaospyudf.so
+ls -l /usr/lib/libtaospyudf.so
 ```
+
+:::tip
+If auto-detection fails, you can specify the Python installation path via the `PYTHONHOME` environment variable:
+
+```shell
+export PYTHONHOME=/usr/local/python3.12
+```
+
+:::
+
+#### Windows
+
+On Windows, `taosudf.exe` automatically locates `python.exe` in the system PATH and sets `PYTHONHOME` accordingly. No manual environment variable configuration is required.
+
+The installation package includes a single plugin library: `taospyudf.dll`.
+
+Just ensure the following:
+
+- The system has Python 3.10+ installed. Download from [python.org](https://www.python.org/downloads/).
+- During Python installation, check "Add python.exe to PATH", or manually add the Python installation directory to the system PATH.
+
+:::tip
+If `python.exe` is not in PATH (e.g., using a portable/embedded Python), you can manually set the `PYTHONHOME` environment variable to point to the Python installation directory:
+
+```powershell
+$env:PYTHONHOME = "C:\Python315"
+```
+
+:::
+
+:::note
+For versions prior to v3.4.1.12, you need to manually install the Python UDF plugin via `pip3 install taospyudf`. Starting from v3.4.1.12, this step is no longer necessary.
+:::
+
+### Manually Building taospyudf (Optional)
+
+In most cases, manual compilation is unnecessary because `taospyudf` is already shipped with TDengine. If you need to rebuild it (for development/debugging), build it from the TDengine source tree.
+
+The source files are located in `source/taos-community/source/libs/pyudf/src/` in the TDengine source tree, and can also be downloaded from [GitHub](https://github.com/taosdata/TDengine/tree/main/source/taos-community/source/libs/pyudf/src).
+
+#### Linux / macOS
+
+On Linux, the recommended manual build flow is the lightweight 1/2/3/4 process below (no full-repo `cmake` configure required).
+
+```bash
+# 1. Install dependencies (Linux)
+#    Ubuntu/Debian:
+sudo apt install python3-dev g++
+#    CentOS/RHEL:
+sudo yum install python3-devel gcc-c++
+
+# 2. Prepare headers (pybind11 is no longer required)
+#    plog:
+git clone --depth=1 https://github.com/SergiusTheBest/plog.git /tmp/plog
+#    Python include flags are obtained automatically via python3-config
+
+# 3. Compile (run from pyudf source directory)
+cd source/taos-community/source/libs/pyudf/src
+g++ -std=c++17 -fPIC -shared taospyudf.cpp \
+    -o libtaospyudf.so \
+    -I/tmp/plog/include \
+    -I/usr/local/taos/include \
+    -I. \
+    $(python3-config --includes) \
+    -Wno-attributes -Wno-deprecated-declarations \
+    -Wl,--allow-shlib-undefined -ldl
+
+# 4. Install to system path (Linux)
+sudo cp libtaospyudf.so /usr/local/taos/driver/
+sudo ln -sf /usr/local/taos/driver/libtaospyudf.so /usr/lib/libtaospyudf.so
+sudo ldconfig
+
+# Fallback: build only taospyudf target from TDengine source tree
+cmake -S source/taos-community -B debug -DCMAKE_BUILD_TYPE=Release -DBUILD_PYUDF=ON
+cmake --build debug --target taospyudf -j
+```
+
+:::note
+The generated library name is `libtaospyudf.so` on Linux and `libtaospyudf.dylib` on macOS.
+:::
+
+#### Windows
+
+On Windows, the recommended manual build flow is the lightweight 1/2/3/4 process below (no full-repo `cmake` configure required).
+
+```powershell
+# 1. Install dependencies (Windows)
+#    - Visual Studio 2019/2022 (with "Desktop development with C++" workload)
+#    - Python 3.10+ (installer build, preferably added to PATH)
+
+# 2. Prepare headers (pybind11 is no longer required)
+git clone --depth=1 https://github.com/SergiusTheBest/plog.git C:\tmp\plog
+
+# 3. Compile (run in "Developer PowerShell for VS")
+cd source\taos-community\source\libs\pyudf\src
+
+# Get Python include directory from the current interpreter
+$pyInc = (python -c "import sysconfig; print(sysconfig.get_path('include'))").Trim()
+
+# Use export macros and build DLL directly
+cl /std:c++17 /EHsc /LD taospyudf.cpp /I C:\tmp\plog\include /I C:\TDengine\include /I . /I "$pyInc" /DBUILDING_DLL /D_CRT_SECURE_NO_WARNINGS /link /OUT:taospyudf.dll
+
+# 4. Install to system path (Windows)
+copy taospyudf.dll "C:\TDengine\bin\"
+
+# Fallback: build only taospyudf target from TDengine source tree
+cmake -S source/taos-community -B debug -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_PYUDF=ON
+cmake --build debug --target taospyudf
+```
+
+:::note
+The generated library name on Windows is `taospyudf.dll`.
+:::
 
 ### Interface Definition
 
@@ -468,7 +661,11 @@ The table below describes the mapping between TDengine SQL data types and Python
 
 This article includes 5 example programs, ranging from basic to advanced, and also contains numerous practical debugging tips.
 
-Note: **Within UDF, logging cannot be done using the print function; you must write to a file or use Python's built-in logging library.**
+:::note
+
+Within UDF, logging cannot be done using the print function; you must write to a file or use Python's built-in logging library.
+
+:::
 
 #### Example One
 
@@ -492,17 +689,17 @@ def process(block):
 This file contains 3 functions, `init` and `destroy` are empty functions, they are the lifecycle functions of UDF, even if they do nothing, they must be defined. The most crucial is the `process` function, which accepts a data block. This data block object has two methods.
 
 1. `shape()` returns the number of rows and columns of the data block
-2. `data(i, j)` returns the data at row i, column j
+1. `data(i, j)` returns the data at row i, column j
 
 The scalar function's `process` method must return as many rows of data as there are in the data block. The above code ignores the number of columns, as it only needs to compute each row's first column.
 
 Next, create the corresponding UDF function, execute the following statement in the TDengine CLI.
 
 ```sql
-create function myfun as '/root/udf/myfun.py' outputtype double language 'Python'
+CREATE FUNCTION myfun AS '/root/udf/myfun.py' OUTPUTTYPE DOUBLE LANGUAGE 'Python';
 ```
 
-```shell
+```text
 taos> create function myfun as '/root/udf/myfun.py' outputtype double language 'Python';
 Create OK, 0 row(s) affected (0.005202s)
 ```
@@ -520,16 +717,16 @@ Query OK, 1 row(s) in set (0.005767s)
 Generate test data, you can execute the following commands in the TDengine CLI.
 
 ```sql
-create database test;
-create table t(ts timestamp, v1 int, v2 int, v3 int);
-insert into t values('2023-05-01 12:13:14', 1, 2, 3);
-insert into t values('2023-05-03 08:09:10', 2, 3, 4);
-insert into t values('2023-05-10 07:06:05', 3, 4, 5);
+CREATE DATABASE test;
+CREATE TABLE t(ts TIMESTAMP, v1 INT, v2 INT, v3 INT);
+INSERT INTO t VALUES('2023-05-01 12:13:14', 1, 2, 3);
+INSERT INTO t VALUES('2023-05-03 08:09:10', 2, 3, 4);
+INSERT INTO t VALUES('2023-05-10 07:06:05', 3, 4, 5);
 ```
 
 Test the myfun function.
 
-```sql
+```text
 taos> select myfun(v1, v2) from t;
 
 DB error: udf function execution failure (0.011088s)
@@ -548,11 +745,11 @@ Found the following error messages.
 05/24 22:46:28.733561 01665799 UDF ERROR can not load python plugin. lib path libtaospyudf.so
 ```
 
-The error is clear: the Python plugin `libtaospyudf.so` was not loaded. If you encounter this error, please refer to the previous section on setting up the environment.
+The error is clear: the Python plugin `libtaospyudf.so` was not loaded. Starting from v3.4.1.12, this plugin is shipped built-in with TDengine TSDB. If you encounter this error, ensure that TDengine TSDB is properly installed and run `ldconfig` to refresh the dynamic library cache. For versions prior to v3.4.1.12, install the plugin manually via `pip3 install taospyudf`.
 
 After fixing the environment error, execute again as follows.
 
-```sql
+```text
 taos> select myfun(v1) from t;
          myfun(v1)         |
 ============================
@@ -561,7 +758,7 @@ taos> select myfun(v1) from t;
                2.302585093 |
 ```
 
-With this, we have completed our first UDF 😊, and learned some basic debugging methods.
+With this, we have completed our first UDF and learned some basic debugging methods.
 
 #### Example 2
 
@@ -569,7 +766,7 @@ Although the myfun function passed the test, it has two drawbacks.
 
 1. This scalar function only accepts 1 column of data as input, and it will not throw an exception if multiple columns are passed.
 
-```sql
+```text
 taos> select myfun(v1, v2) from t;
        myfun(v1, v2)       |
 ============================
@@ -578,7 +775,7 @@ taos> select myfun(v1, v2) from t;
                2.302585093 |
 ```
 
-2. It does not handle null values. We expect that if the input contains null, it will throw an exception and terminate execution. Therefore, the process function is improved as follows.
+1. It does not handle null values. We expect that if the input contains null, it will throw an exception and terminate execution. Therefore, the process function is improved as follows.
 
 ```python
 def process(block):
@@ -591,12 +788,12 @@ def process(block):
 Execute the following statement to update the existing UDF.
 
 ```sql
-create or replace function myfun as '/root/udf/myfun.py' outputtype double language 'Python';
+CREATE OR REPLACE FUNCTION myfun AS '/root/udf/myfun.py' OUTPUTTYPE DOUBLE LANGUAGE 'Python';
 ```
 
 Passing two arguments to myfun will result in a failure.
 
-```sql
+```text
 taos> select myfun(v1, v2) from t;
 
 DB error: udf function execution failure (0.014643s)
@@ -609,7 +806,6 @@ Custom exception messages are logged in the plugin log file `/var/log/taos/taosp
 
 At:
   /var/lib/taos//.udf/myfun_3_1884e1281d9.py(12): process
-
 ```
 
 Thus, we have learned how to update UDFs and view the error logs output by UDFs.
@@ -646,12 +842,12 @@ def process(block):
 Create the UDF.
 
 ```sql
-create function nsum as '/root/udf/nsum.py' outputtype double language 'Python';
+CREATE FUNCTION nsum AS '/root/udf/nsum.py' OUTPUTTYPE DOUBLE LANGUAGE 'Python';
 ```
 
 Test the UDF.
 
-```sql
+```text
 taos> insert into t values('2023-05-25 09:09:15', 6, null, 8);
 Insert OK, 1 row(s) affected (0.003675s)
 
@@ -698,12 +894,12 @@ def process(block):
 The UDF framework maps TDengine's timestamp type to Python's int type, so this function only accepts an integer representing milliseconds. The process method first checks the parameters, then uses the moment package to replace the day of the week with Sunday, and finally formats the output. The output string length is fixed at 10 characters long, so you can create the UDF function like this.
 
 ```sql
-create function nextsunday as '/root/udf/nextsunday.py' outputtype binary(10) language 'Python';
+CREATE FUNCTION nextsunday AS '/root/udf/nextsunday.py' OUTPUTTYPE BINARY(10) LANGUAGE 'Python';
 ```
 
 At this point, test the function. If you started taosd with systemctl, you will definitely encounter an error.
 
-```sql
+```text
 taos> select ts, nextsunday(ts) from t;
 
 DB error: udf function execution failure (1.123615s)
@@ -737,13 +933,13 @@ First, open the python3 command line and check the current sys.path.
 
 Copy the output string from the script above, then edit `/var/taos/taos.cfg` and add the following configuration.
 
-```shell
+```text
 UdfdLdLibPath /usr/lib/python3.8:/usr/lib/python3.8/lib-dynload:/usr/local/lib/python3.8/dist-packages:/usr/lib/python3/dist-packages
 ```
 
 After saving, execute `systemctl restart taosd`, then test again and there will be no errors.
 
-```sql
+```text
 taos> select ts, nextsunday(ts) from t;
            ts            | nextsunday(ts) |
 ===========================================
@@ -803,22 +999,22 @@ def finish(buf):
 In this example, we not only defined an aggregate function but also added the functionality to record execution logs.
 
 1. The `init` function opens a file for logging.
-2. The `log` function records logs, automatically converting the incoming object into a string and appending a newline.
-3. The `destroy` function closes the log file after execution.
-4. The `start` function returns the initial buffer to store intermediate results of the aggregate function, initializing the maximum value as negative infinity and the minimum value as positive infinity.
-5. The `reduce` function processes each data block and aggregates the results.
-6. The `finish` function converts the buffer into the final output.
+1. The `log` function records logs, automatically converting the incoming object into a string and appending a newline.
+1. The `destroy` function closes the log file after execution.
+1. The `start` function returns the initial buffer to store intermediate results of the aggregate function, initializing the maximum value as negative infinity and the minimum value as positive infinity.
+1. The `reduce` function processes each data block and aggregates the results.
+1. The `finish` function converts the buffer into the final output.
 
 Execute the following SQL statement to create the corresponding UDF.
 
 ```sql
-create or replace aggregate function myspread as '/root/udf/myspread.py' outputtype double bufsize 128 language 'Python';
+CREATE OR REPLACE AGGREGATE FUNCTION myspread AS '/root/udf/myspread.py' OUTPUTTYPE DOUBLE BUFSIZE 128 LANGUAGE 'Python';
 ```
 
 This SQL statement has two important differences from the SQL statement used to create scalar functions.
 
 1. Added the `aggregate` keyword.
-2. Added the `bufsize` keyword, which is used to specify the memory size for storing intermediate results. This value can be larger than the actual usage. In this example, the intermediate result is a tuple consisting of two floating-point arrays, which actually occupies only 32 bytes when serialized, but the specified `bufsize` is 128. You can use the Python command line to print the actual number of bytes used.
+1. Added the `bufsize` keyword, which is used to specify the memory size for storing intermediate results. This value can be larger than the actual usage. In this example, the intermediate result is a tuple consisting of two floating-point arrays, which actually occupies only 32 bytes when serialized, but the specified `bufsize` is 128. You can use the Python command line to print the actual number of bytes used.
 
 ```python
 >>> len(pickle.dumps((12345.6789, 23456789.9877)))
@@ -827,7 +1023,7 @@ This SQL statement has two important differences from the SQL statement used to 
 
 To test this function, you can see that the output of `myspread` is consistent with that of the built-in `spread` function.
 
-```sql
+```text
 taos> select myspread(v1) from t;
        myspread(v1)        |
 ============================
@@ -843,7 +1039,7 @@ Query OK, 1 row(s) in set (0.005501s)
 
 Finally, by checking the execution log, you can see that the reduce function was executed 3 times, during which the max value was updated 4 times, and the min value was updated only once.
 
-```shell
+```text
 root@server11 /var/log/taos $ cat spread.log
 init function myspead success
 initial max_number=-inf, min_number=inf
@@ -861,7 +1057,7 @@ Through this example, we learned how to define aggregate functions and print cus
 
 ### More Python UDF Example Code
 
-#### Scalar Function Example [pybitand](https://github.com/taosdata/TDengine/blob/3.0/tests/script/sh/pybitand.py)
+#### Scalar Function Example
 
 `pybitand` implements the bitwise AND function for multiple columns. If there is only one column, it returns that column. `pybitand` ignores null values.
 
@@ -869,32 +1065,33 @@ Through this example, we learned how to define aggregate functions and print cus
 <summary>pybitand.py</summary>
 
 ```python
-{{#include tests/script/sh/pybitand.py}}
+{{#include docs/examples/udf/pybitand.py}}
 ```
 
 </details>
 
-#### Aggregate Function Example [pyl2norm](https://github.com/taosdata/TDengine/blob/3.0/tests/script/sh/pyl2norm.py)
+#### Aggregate Function Example 1
 
 `pyl2norm` calculates the second-order norm of all data in the input column, i.e., squares each data point, then sums them up, and finally takes the square root.
 
 <details>
 <summary>pyl2norm.py</summary>
 
-```c
-{{#include tests/script/sh/pyl2norm.py}}
+```python
+{{#include docs/examples/udf/pyl2norm.py}}
 ```
 
 </details>
 
-#### Aggregate Function Example [pycumsum](https://github.com/taosdata/TDengine/blob/3.0/tests/script/sh/pycumsum.py)
+#### Aggregate Function Example 2
 
 `pycumsum` uses numpy to calculate the cumulative sum of all data in the input column.
+
 <details>
 <summary>pycumsum.py</summary>
 
-```c
-{{#include tests/script/sh/pycumsum.py}}
+```python
+{{#include docs/examples/udf/pycumsum.py}}
 ```
 
 </details>
@@ -917,11 +1114,11 @@ CREATE [OR REPLACE] FUNCTION function_name AS library_path OUTPUTTYPE output_typ
 
 The parameters are explained as follows.
 
-- or replace: If the function already exists, it modifies the existing function properties.
-- function_name: The name of the scalar function when called in SQL.
-- language: Supports C and Python languages (version 3.7 and above), default is C.
-- library_path: If the programming language is C, the path is the absolute path to the library file containing the UDF implementation dynamic link library, usually pointing to a .so file. If the programming language is Python, the path is the path to the Python file containing the UDF implementation. The path needs to be enclosed in single or double quotes in English.
-- output_type: The data type name of the function computation result.
+- `OR REPLACE`: If the function already exists, it modifies the existing function properties.
+- `function_name`: The name of the scalar function when called in SQL.
+- `LANGUAGE`: Supports C and Python languages (version 3.7 and above), default is C.
+- `library_path`: If the programming language is C, the path is the absolute path to the library file containing the UDF implementation dynamic link library, usually pointing to a .so file. If the programming language is Python, the path is the path to the Python file containing the UDF implementation. The path needs to be enclosed in single or double quotes in English.
+- `output_type`: The data type name of the function computation result.
 
 ### Creating Aggregate Functions
 
@@ -952,7 +1149,7 @@ DROP FUNCTION function_name;
 The SQL to display all currently available UDFs in the cluster is as follows.
 
 ```sql
-show functions;
+SHOW FUNCTIONS;
 ```
 
 ### Viewing Function Information
@@ -960,5 +1157,5 @@ show functions;
 Each update of a UDF with the same name increases the version number by 1.
 
 ```sql
-select * from ins_functions \G;     
+SELECT * FROM ins_functions \G;     
 ```

@@ -1,13 +1,20 @@
 aux_source_directory(src WRAPPER_SRC)
 
 if(TD_WINDOWS)
-    add_library(${TAOS_LIB} SHARED ${WRAPPER_SRC} ${CMAKE_CURRENT_SOURCE_DIR}/../src/taos.rc.in)
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/../src/taos.rc.in "${CMAKE_CURRENT_BINARY_DIR}/taos.rc")
+    add_library(${TAOS_LIB} SHARED ${WRAPPER_SRC} "${CMAKE_CURRENT_BINARY_DIR}/taos.rc")
 else()
     add_library(${TAOS_LIB} SHARED ${WRAPPER_SRC})
 endif()
 
-if(${TD_DARWIN})
+if(TD_DARWIN)
     target_compile_options(${TAOS_LIB} PRIVATE -Wno-error=deprecated-non-prototype)
+    # Suppress ld64 duplicate static library warnings from deep transitive deps.
+    include(CheckLinkerFlag)
+    check_linker_flag(C "-Wl,-no_warn_duplicate_libraries" HAVE_NO_WARN_DUP_LIBS)
+    if(HAVE_NO_WARN_DUP_LIBS)
+      target_link_options(${TAOS_LIB} PRIVATE -Wl,-no_warn_duplicate_libraries)
+    endif()
 endif()
 
 # jni include
@@ -31,23 +38,9 @@ target_link_libraries(
     PUBLIC os util
 )
 
-set_target_properties(
-    ${TAOS_LIB}
-    PROPERTIES
-    CLEAN_DIRECT_OUTPUT
-    1
-)
-
-set_target_properties(
-    ${TAOS_LIB}
-    PROPERTIES
-    VERSION ${TD_VER_NUMBER}
-    SOVERSION 1
-)
-
 add_library(${TAOS_LIB_STATIC} STATIC ${WRAPPER_SRC})
 
-if(${TD_DARWIN})
+if(TD_DARWIN)
     target_compile_options(${TAOS_LIB_STATIC} PRIVATE -Wno-error=deprecated-non-prototype)
 endif()
 
@@ -64,4 +57,4 @@ target_link_libraries(
 
 # if(${BUILD_TEST})
 # ADD_SUBDIRECTORY(test)
-# endif(${BUILD_TEST})
+# endif()

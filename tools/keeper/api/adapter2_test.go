@@ -2,15 +2,22 @@ package api
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/taosdata/taoskeeper/db"
 	"github.com/taosdata/taoskeeper/infrastructure/config"
+	"github.com/taosdata/taoskeeper/testutil"
 	"github.com/taosdata/taoskeeper/util"
 )
 
@@ -21,11 +28,11 @@ func TestAdapter2(t *testing.T) {
 		TDengine: config.TDengineRestful{
 			Host:     "127.0.0.1",
 			Port:     6041,
-			Username: "root",
-			Password: "taosdata",
+			Username: testutil.TestUsername(),
+			Password: testutil.TestPassword(),
 			Usessl:   false,
 		},
-		Metrics: config.MetricsConfig{
+		Metrics: config.Metrics{
 			Database: config.Database{
 				Name:    "adapter_report_test",
 				Options: map[string]interface{}{},
@@ -53,11 +60,11 @@ func TestAdapter2(t *testing.T) {
 
 	conn, err := db.NewConnectorWithDb(c.TDengine.Username, c.TDengine.Password, c.TDengine.Host, c.TDengine.Port, c.Metrics.Database.Name, c.TDengine.Usessl)
 	defer func() {
-		_, _ = conn.Query(context.Background(), fmt.Sprintf("drop database if exists %s", c.Metrics.Database.Name), util.GetQidOwn())
+		_, _ = conn.Query(context.Background(), fmt.Sprintf("drop database if exists %s", c.Metrics.Database.Name), util.GetQidOwn(config.Conf.InstanceID))
 	}()
 
 	assert.NoError(t, err)
-	data, err := conn.Query(context.Background(), "select * from adapter_requests where req_type=0", util.GetQidOwn())
+	data, err := conn.Query(context.Background(), "select * from adapter_requests where req_type=0", util.GetQidOwn(config.Conf.InstanceID))
 
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(data.Data))
@@ -77,7 +84,7 @@ func TestAdapter2(t *testing.T) {
 	assert.Equal(t, uint32(1), data.Data[0][14])
 	assert.Equal(t, uint32(2), data.Data[0][15])
 
-	data, err = conn.Query(context.Background(), "select * from adapter_requests where req_type=1", util.GetQidOwn())
+	data, err = conn.Query(context.Background(), "select * from adapter_requests where req_type=1", util.GetQidOwn(config.Conf.InstanceID))
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(data.Data))
 	assert.Equal(t, uint32(10), data.Data[0][1])
@@ -112,31 +119,31 @@ func TestAdapter2(t *testing.T) {
 	router.ServeHTTP(w, req3)
 	assert.Equal(t, 200, w.Code)
 
-	data, err = conn.Query(context.Background(), "select count(*) from adapter_status", util.GetQidOwn())
+	data, err = conn.Query(context.Background(), "select count(*) from adapter_status", util.GetQidOwn(config.Conf.InstanceID))
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(data.Data))
 	assert.Equal(t, int64(2), data.Data[0][0])
 
-	data, err = conn.Query(context.Background(), "select count(*) from adapter_conn_pool", util.GetQidOwn())
+	data, err = conn.Query(context.Background(), "select count(*) from adapter_conn_pool", util.GetQidOwn(config.Conf.InstanceID))
 	assert.NoError(t, err)
 	assert.Equal(t, 1, len(data.Data))
 	assert.Equal(t, int64(2), data.Data[0][0])
 
-	conn.Query(context.Background(), fmt.Sprintf("drop database if exists %s", c.Metrics.Database.Name), util.GetQidOwn())
+	conn.Query(context.Background(), fmt.Sprintf("drop database if exists %s", c.Metrics.Database.Name), util.GetQidOwn(config.Conf.InstanceID))
 }
 
 func Test_adapterTableSql(t *testing.T) {
-	conn, _ := db.NewConnector("root", "taosdata", "127.0.0.1", 6041, false)
+	conn, _ := db.NewConnector(testutil.TestUsername(), testutil.TestPassword(), "127.0.0.1", 6041, false)
 	defer conn.Close()
 
 	dbName := "db_202412031446"
-	conn.Exec(context.Background(), "create database "+dbName, util.GetQidOwn())
-	defer conn.Exec(context.Background(), "drop database "+dbName, util.GetQidOwn())
+	conn.Exec(context.Background(), "create database "+dbName, util.GetQidOwn(config.Conf.InstanceID))
+	defer conn.Exec(context.Background(), "drop database "+dbName, util.GetQidOwn(config.Conf.InstanceID))
 
-	conn, _ = db.NewConnectorWithDb("root", "taosdata", "127.0.0.1", 6041, dbName, false)
+	conn, _ = db.NewConnectorWithDb(testutil.TestUsername(), testutil.TestPassword(), "127.0.0.1", 6041, dbName, false)
 	defer conn.Close()
 
-	conn.Exec(context.Background(), adapterTableSql, util.GetQidOwn())
+	conn.Exec(context.Background(), adapterTableSql, util.GetQidOwn(config.Conf.InstanceID))
 
 	testCases := []struct {
 		ep      string
@@ -151,11 +158,184 @@ func Test_adapterTableSql(t *testing.T) {
 
 	for i, tc := range testCases {
 		sql := fmt.Sprintf("create table d%d using adapter_requests tags ('%s', 0)", i, tc.ep)
-		_, err := conn.Exec(context.Background(), sql, util.GetQidOwn())
+		_, err := conn.Exec(context.Background(), sql, util.GetQidOwn(config.Conf.InstanceID))
 		if tc.wantErr {
 			assert.Error(t, err) // [0x2653] Value too long for column/tag: endpoint
 		} else {
 			assert.NoError(t, err)
 		}
+	}
+}
+
+func TestAdapter_tableName(t *testing.T) {
+	a := &Adapter{}
+	endpoint := strings.Repeat("x", util.MAX_TABLE_NAME_LEN)
+
+	gotRest := a.tableName(endpoint, rest)
+	sumRest := md5.Sum([]byte(fmt.Sprintf("%s%d", endpoint, rest)))
+	wantRest := fmt.Sprintf("adapter_req_%s", hex.EncodeToString(sumRest[:]))
+	assert.Equal(t, wantRest, gotRest)
+
+	gotWS := a.tableName(endpoint, ws)
+	sumWS := md5.Sum([]byte(fmt.Sprintf("%s%d", endpoint, ws)))
+	wantWS := fmt.Sprintf("adapter_req_%s", hex.EncodeToString(sumWS[:]))
+	assert.Equal(t, wantWS, gotWS)
+
+	assert.NotEqual(t, gotRest, gotWS)
+}
+
+func TestAdapter_handleFunc_NoConnection_Returns500(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	a := &Adapter{conn: nil}
+	r.POST("/adapter_report", a.handleFunc())
+
+	req := httptest.NewRequest(http.MethodPost, "/adapter_report", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-QID", "1")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want=%d", w.Code, http.StatusInternalServerError)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal error: %v, raw=%q", err, w.Body.String())
+	}
+	if body["error"] != "no connection" {
+		t.Fatalf(`error=%q, want "no connection"`, body["error"])
+	}
+}
+
+type badReader struct{ err error }
+
+func (b badReader) Read(p []byte) (int, error) { return 0, b.err }
+
+func TestAdapter_handleFunc_GetRawDataError_Returns400(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	a := &Adapter{conn: &db.Connector{}}
+	r.POST("/adapter_report", a.handleFunc())
+
+	req := httptest.NewRequest(http.MethodPost, "/adapter_report", badReader{err: errors.New("boom")})
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want=%d", w.Code, http.StatusBadRequest)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal error: %v, raw=%q", err, w.Body.String())
+	}
+	if body["error"] != "get adapter report data error. boom" {
+		t.Fatalf("error=%q, want %q", body["error"], "get adapter report data error. boom")
+	}
+}
+
+func TestAdapter_handleFunc_TraceReceiveData_LogsWhenEnabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	old := logger.Logger.GetLevel()
+	logger.Logger.SetLevel(logrus.TraceLevel)
+	defer logger.Logger.SetLevel(old)
+
+	a := &Adapter{conn: &db.Connector{}}
+	r.POST("/adapter_report", a.handleFunc())
+
+	req := httptest.NewRequest(http.MethodPost, "/adapter_report", strings.NewReader(`{`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-QID", "123")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAdapter_handleFunc_ParseError_ReturnsBadRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	a := &Adapter{conn: &db.Connector{}}
+	r.POST("/adapter_report", a.handleFunc())
+
+	req := httptest.NewRequest(http.MethodPost, "/adapter_report", strings.NewReader(`{`)) // invalid JSON
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-QID", "1")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want=%d", w.Code, http.StatusBadRequest)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response error: %v, raw=%q", err, w.Body.String())
+	}
+	if !strings.HasPrefix(body["error"], "parse adapter report data error: ") {
+		t.Fatalf("error prefix mismatch, got %q", body["error"])
+	}
+}
+
+func TestAdapter_createTable_UpgradeEndpointTagLengthTo255(t *testing.T) {
+	cfg := config.GetCfg()
+	qid := util.GetQidOwn(cfg.InstanceID)
+
+	conn1, err := db.NewConnector(cfg.TDengine.Username, cfg.TDengine.Password, cfg.TDengine.Host, cfg.TDengine.Port, cfg.TDengine.Usessl)
+	assert.NoError(t, err)
+	defer conn1.Close()
+
+	_, err = conn1.Query(context.Background(), "drop database if exists test_1777449664", qid)
+	assert.NoError(t, err)
+	_, err = conn1.Query(context.Background(), "create database test_1777449664", qid)
+	assert.NoError(t, err)
+	defer func() {
+		_, _ = conn1.Query(context.Background(), "drop database if exists test_1777449664", qid)
+	}()
+
+	conn2, err := db.NewConnectorWithDb(cfg.TDengine.Username, cfg.TDengine.Password, cfg.TDengine.Host, cfg.TDengine.Port, "test_1777449664", cfg.TDengine.Usessl)
+	assert.NoError(t, err)
+	defer conn2.Close()
+
+	oldAdapterTableSql := strings.Replace(adapterTableSql, "varchar(255)", "varchar(32)", 1)
+	_, err = conn2.Query(context.Background(), oldAdapterTableSql, qid)
+	assert.NoError(t, err)
+
+	a := &Adapter{conn: conn2}
+	err = a.createTable()
+	assert.NoError(t, err)
+
+	result, err := conn2.Query(context.Background(), "desc adapter_requests", qid)
+	assert.NoError(t, err)
+
+	foundEndpoint := false
+	endpointLen := int32(0)
+	for _, row := range result.Data {
+		if row[0] == "endpoint" {
+			foundEndpoint = true
+			endpointLen, _ = row[2].(int32)
+			break
+		}
+	}
+
+	assert.True(t, foundEndpoint)
+	assert.Equal(t, int32(255), endpointLen)
+}
+
+func TestAdapter_createTable_NoConnection_ReturnsErrNoConnection(t *testing.T) {
+	a := &Adapter{conn: nil}
+
+	err := a.createTable()
+	if !errors.Is(err, errNoConnection) {
+		t.Fatalf("expected errNoConnection, got %v", err)
 	}
 }

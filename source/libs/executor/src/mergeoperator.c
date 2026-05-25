@@ -40,7 +40,7 @@ typedef struct SNonSortMergeInfo {
 typedef struct SColsMergeInfo {
   SNodeList* pTargets;
   size_t     sourceNum;
-  uint64_t*  srcBlkIds;
+  int64_t*   srcBlkIds;
 } SColsMergeInfo;
 
 typedef struct SMultiwayMergeOperatorInfo {
@@ -66,30 +66,34 @@ static int32_t sortMergeloadNextDataBlock(void* param, SSDataBlock** ppBlock);
 
 int32_t sortMergeloadNextDataBlock(void* param, SSDataBlock** ppBlock) {
   SOperatorInfo* pOperator = (SOperatorInfo*)param;
-  int32_t        code = pOperator->fpSet.getNextFn(pOperator, ppBlock);
-  if (code) {
-    qError("failed to get next data block from upstream, %s code:%s", __func__, tstrerror(code));
-  }
+  int32_t        code = TSDB_CODE_SUCCESS;
+  int32_t        lino = 0;
+
+  code = pOperator->fpSet.getNextFn(pOperator, ppBlock);
+  QUERY_CHECK_CODE(code, lino, _return);
+
   code = blockDataCheck(*ppBlock);
-  if (code) {
-    qError("failed to check data block got from upstream, %s code:%s", __func__, tstrerror(code));
-  }
+  QUERY_CHECK_CODE(code, lino, _return);
+
+  return code;
+_return:
+  qError("%s failed to load next data block from upstream, %s line: %d, code:%s", __func__, GET_TASKID(pOperator->pTaskInfo),
+         lino, tstrerror(code));
   return code;
 }
 
 int32_t openSortMergeOperator(SOperatorInfo* pOperator) {
+  int32_t                     code = TSDB_CODE_SUCCESS;
+  int32_t                     lino = 0;
   SMultiwayMergeOperatorInfo* pInfo = pOperator->info;
   SExecTaskInfo*              pTaskInfo = pOperator->pTaskInfo;
   SSortMergeInfo*             pSortMergeInfo = &pInfo->sortMergeInfo;
-
-  int32_t numOfBufPage = pSortMergeInfo->sortBufSize / pSortMergeInfo->bufPageSize;
+  int32_t                     numOfBufPage = (int32_t)pSortMergeInfo->sortBufSize / pSortMergeInfo->bufPageSize;
 
   pSortMergeInfo->pSortHandle = NULL;
-  int32_t code = tsortCreateSortHandle(pSortMergeInfo->pSortInfo, SORT_MULTISOURCE_MERGE, pSortMergeInfo->bufPageSize,
-                                       numOfBufPage, pSortMergeInfo->pInputBlock, pTaskInfo->id.str, 0, 0, 0, &pSortMergeInfo->pSortHandle);
-  if (code) {
-    return code;
-  }
+  code = tsortCreateSortHandle(pSortMergeInfo->pSortInfo, SORT_MULTISOURCE_MERGE, pSortMergeInfo->bufPageSize,
+                               numOfBufPage, pSortMergeInfo->pInputBlock, pTaskInfo->id.str, 0, 0, 0, &pSortMergeInfo->pSortHandle);
+  QUERY_CHECK_CODE(code, lino, _return);
 
   tsortSetFetchRawDataFp(pSortMergeInfo->pSortHandle, sortMergeloadNextDataBlock, NULL, NULL);
   tsortSetCompareGroupId(pSortMergeInfo->pSortHandle, pInfo->groupMerge);
@@ -98,26 +102,31 @@ int32_t openSortMergeOperator(SOperatorInfo* pOperator) {
     SOperatorInfo* pDownstream = pOperator->pDownstream[i];
     if (pDownstream->operatorType == QUERY_NODE_PHYSICAL_PLAN_EXCHANGE) {
       code = pDownstream->fpSet._openFn(pDownstream);
-      if (code) {
-        return code;
+      QUERY_CHECK_CODE(code, lino, _return);
+      if (pOperator->pDownstreamGetParams && pOperator->pDownstreamGetParams[i]) {
+        pDownstream->pOperatorGetParam = pOperator->pDownstreamGetParams[i];
+        pOperator->pDownstreamGetParams[i] = NULL;
       }
     }
 
     SSortSource* ps = taosMemoryCalloc(1, sizeof(SSortSource));
-    if (ps == NULL) {
-      return terrno;
-    }
+    QUERY_CHECK_NULL(ps, code, lino, _return, terrno);
 
     ps->param = pDownstream;
     ps->onlyRef = true;
 
     code = tsortAddSource(pSortMergeInfo->pSortHandle, ps);
-    if (code) {
-      return code;
-    }
+    QUERY_CHECK_CODE(code, lino, _return);
   }
 
-  return tsortOpen(pSortMergeInfo->pSortHandle);
+  code = tsortOpen(pSortMergeInfo->pSortHandle);
+  QUERY_CHECK_CODE(code, lino, _return);
+
+_return:
+  if (code) {
+    qError("%s failed to open sort merge operator, %s at line %d, code:%s", __func__, GET_TASKID(pTaskInfo), lino, tstrerror(code));
+  }
+  return code;
 }
 
 static int32_t doGetSortedBlockData(SMultiwayMergeOperatorInfo* pInfo, SSortHandle* pHandle, int32_t capacity,
@@ -138,7 +147,8 @@ static int32_t doGetSortedBlockData(SMultiwayMergeOperatorInfo* pInfo, SSortHand
       } else {
         pTupleHandle = pSortMergeInfo->prefetchedTuple;
         pSortMergeInfo->prefetchedTuple = NULL;
-        uint64_t gid = tsortGetGroupId(pTupleHandle);
+        uint64_t gid = 0, baseGid = 0;
+        tsortGetGroupId(pTupleHandle, &gid, &baseGid);
         if (gid != pInfo->groupId) {
           *newgroup = true;
           pInfo->groupId = gid;
@@ -154,7 +164,8 @@ static int32_t doGetSortedBlockData(SMultiwayMergeOperatorInfo* pInfo, SSortHand
     }
 
     if (pInfo->groupMerge || pInfo->inputWithGroupId) {
-      uint64_t tupleGroupId = tsortGetGroupId(pTupleHandle);
+      uint64_t tupleGroupId = 0, tupleBaseGid = 0;
+      tsortGetGroupId(pTupleHandle, &tupleGroupId, &tupleBaseGid);
       if (pInfo->groupId == 0 || pInfo->groupId == tupleGroupId) {
         code = appendOneRowToDataBlock(p, pTupleHandle);
         if (code) {
@@ -162,6 +173,7 @@ static int32_t doGetSortedBlockData(SMultiwayMergeOperatorInfo* pInfo, SSortHand
         }
 
         p->info.id.groupId = tupleGroupId;
+        p->info.id.baseGId = tupleBaseGid;
         pInfo->groupId = tupleGroupId;
       } else {
         if (p->info.rows == 0) {
@@ -171,6 +183,7 @@ static int32_t doGetSortedBlockData(SMultiwayMergeOperatorInfo* pInfo, SSortHand
           }
 
           p->info.id.groupId = pInfo->groupId = tupleGroupId;
+          p->info.id.baseGId = tupleBaseGid;
         } else {
           pSortMergeInfo->prefetchedTuple = pTupleHandle;
           break;
@@ -252,13 +265,13 @@ int32_t doSortMerge(SOperatorInfo* pOperator, SSDataBlock** pResBlock) {
         return code;
       }
 
-      SColumnInfoData* pSrc = taosArrayGet(p->pDataBlock, pmInfo->srcSlotId);
+      SColumnInfoData* pSrc = getDataBlockColBySlotId(p, pmInfo->srcSlotId, NULL);
       if (pSrc == NULL) {
         code = terrno;
         return code;
       }
 
-      SColumnInfoData* pDst = taosArrayGet(pDataBlock->pDataBlock, pmInfo->dstSlotId);
+      SColumnInfoData* pDst = getDataBlockColBySlotId(pDataBlock, pmInfo->dstSlotId, NULL);
       if (pDst == NULL) {
         code = terrno;
         return code;
@@ -274,8 +287,10 @@ int32_t doSortMerge(SOperatorInfo* pOperator, SSDataBlock** pResBlock) {
     pDataBlock->info.scanFlag = p->info.scanFlag;
     if (pInfo->ignoreGroupId) {
       pDataBlock->info.id.groupId = 0;
+      pDataBlock->info.id.baseGId = p->info.id.baseGId;
     } else {
       pDataBlock->info.id.groupId = pInfo->groupId;
+      pDataBlock->info.id.baseGId = p->info.id.baseGId;
     }
     pDataBlock->info.dataLoad = 1;
   }
@@ -392,40 +407,6 @@ int32_t openColsMergeOperator(SOperatorInfo* pOperator) {
   return TSDB_CODE_SUCCESS;
 }
 
-int32_t copyColumnsValue(SNodeList* pNodeList, uint64_t targetBlkId, SSDataBlock* pDst, SSDataBlock* pSrc) {
-  bool    isNull = (NULL == pSrc || pSrc->info.rows <= 0);
-  size_t  numOfCols = LIST_LENGTH(pNodeList);
-  int32_t code = 0;
-
-  for (int32_t i = 0; i < numOfCols; ++i) {
-    STargetNode* pNode = (STargetNode*)nodesListGetNode(pNodeList, i);
-    if (nodeType(pNode->pExpr) == QUERY_NODE_COLUMN && ((SColumnNode*)pNode->pExpr)->dataBlockId == targetBlkId) {
-      SColumnInfoData* pDstCol = taosArrayGet(pDst->pDataBlock, pNode->slotId);
-      if (pDstCol == NULL) {
-        return terrno;
-      }
-
-      if (isNull) {
-        code = colDataSetVal(pDstCol, 0, NULL, true);
-      } else {
-        SColumnInfoData* pSrcCol = taosArrayGet(pSrc->pDataBlock, ((SColumnNode*)pNode->pExpr)->slotId);
-        if (pSrcCol == NULL) {
-          code = terrno;
-          return code;
-        }
-
-        code = colDataAssign(pDstCol, pSrcCol, 1, &pDst->info);
-      }
-
-      if (code) {
-        break;
-      }
-    }
-  }
-
-  return code;
-}
-
 int32_t doColsMerge(SOperatorInfo* pOperator, SSDataBlock** pResBlock) {
   QRY_PARAM_CHECK(pResBlock);
 
@@ -433,34 +414,74 @@ int32_t doColsMerge(SOperatorInfo* pOperator, SSDataBlock** pResBlock) {
   SMultiwayMergeOperatorInfo* pInfo = pOperator->info;
   SSDataBlock*                pBlock = NULL;
   SColsMergeInfo*             pColsMerge = &pInfo->colsMergeInfo;
-  int32_t                     nullBlkNum = 0;
   int32_t                     code = 0;
+  int32_t                     numOfRows = 0;
+  int32_t                     lino = 0;
+  STimeWindow                 timeWindow = {.skey = INT64_MAX, .ekey = INT64_MIN};
+  bool                        allNull = true;
+  bool                        isVtableMerge = false;
+
+  if (pOperator->pOperatorGetParam) {
+    if (pOperator->status == OP_EXEC_DONE) {
+      pOperator->status = OP_OPENED;
+    }
+    numOfRows = ((SMergeOperatorParam*)(pOperator->pOperatorGetParam)->value)->winNum;
+    freeOperatorParam(pOperator->pOperatorGetParam, OP_GET_PARAM);
+    pOperator->pOperatorGetParam = NULL;
+    isVtableMerge = true;
+  } else {
+    numOfRows = 1;
+    isVtableMerge = false;
+  }
 
   qDebug("start to merge columns, %s", GET_TASKID(pTaskInfo));
+  blockDataCleanup(pInfo->binfo.pRes);
+  code = blockDataEnsureCapacity(pInfo->binfo.pRes, numOfRows);
+  QUERY_CHECK_CODE(code, lino, _return);
 
   for (int32_t i = 0; i < pColsMerge->sourceNum; ++i) {
-    pBlock = getNextBlockFromDownstream(pOperator, i);
-    if (pBlock && pBlock->info.rows > 1) {
-      qError("more than 1 row returned from downstream, rows:%" PRId64, pBlock->info.rows);
-      T_LONG_JMP(pTaskInfo->env, TSDB_CODE_QRY_EXECUTOR_INTERNAL_ERROR);
-    } else if (NULL == pBlock) {
-      nullBlkNum++;
-    }
-    
-    code = copyColumnsValue(pColsMerge->pTargets, pColsMerge->srcBlkIds[i], pInfo->binfo.pRes, pBlock);
-    if (code) {
-      return code;
+    if (isVtableMerge) {
+      SOperatorInfo*  pExtWinOp = pOperator->pDownstream[i];
+      SOperatorParam* pParam = pOperator->pDownstreamGetParams[i];
+      code = pExtWinOp->fpSet.getNextExtFn(pExtWinOp, pParam, &pBlock);
+      setOperatorCompleted(pExtWinOp);
+      pOperator->pDownstreamGetParams[i] = NULL;
+      QUERY_CHECK_CODE(code, lino, _return);
+      if (pBlock) {
+        printDataBlock(pBlock, __func__, "colsMerge", pTaskInfo->id.queryId);
+        code = copyColumnsValue(pColsMerge->pTargets, pColsMerge->srcBlkIds[i], pInfo->binfo.pRes, pBlock, numOfRows);
+        QUERY_CHECK_CODE(code, lino, _return);
+
+        timeWindow.skey = TMIN(timeWindow.skey, pBlock->info.window.skey);
+        timeWindow.ekey = TMAX(timeWindow.ekey, pBlock->info.window.ekey);
+        allNull = false;
+      } else {
+        code = copyColumnsValue(pColsMerge->pTargets, pColsMerge->srcBlkIds[i], pInfo->binfo.pRes, pBlock, numOfRows);
+        QUERY_CHECK_CODE(code, lino, _return);
+      }
+    } else {
+      pBlock = getNextBlockFromDownstream(pOperator, i);
+      if (pBlock) {
+        code = copyColumnsValue(pColsMerge->pTargets, pColsMerge->srcBlkIds[i], pInfo->binfo.pRes, pBlock, numOfRows);
+        QUERY_CHECK_CODE(code, lino, _return);
+        allNull = false;
+      }
     }
   }
 
   setOperatorCompleted(pOperator);
-  if (pColsMerge->sourceNum == nullBlkNum) {
+  if (allNull) {
     return code;
   }
 
-  pInfo->binfo.pRes->info.rows = 1;
+  pInfo->binfo.pRes->info.window.skey = timeWindow.skey;
+  pInfo->binfo.pRes->info.window.ekey = timeWindow.ekey;
+  pInfo->binfo.pRes->info.rows = numOfRows;
   *pResBlock = pInfo->binfo.pRes;
 
+  return code;
+_return:
+  qError("failed to merge columns, line:%d code:%s", lino, tstrerror(code));
   return code;
 }
 
@@ -491,13 +512,10 @@ int32_t openMultiwayMergeOperator(SOperatorInfo* pOperator) {
     return TSDB_CODE_SUCCESS;
   }
 
-  int64_t startTs = taosGetTimestampUs();
-  
   if (NULL != gMultiwayMergeFps[pInfo->type]._openFn) {
     code = (*gMultiwayMergeFps[pInfo->type]._openFn)(pOperator);
   }
 
-  pOperator->cost.openCost = (taosGetTimestampUs() - startTs) / 1000.0;
   pOperator->status = OP_RES_TO_RETURN;
 
   if (code != TSDB_CODE_SUCCESS) {
@@ -515,7 +533,7 @@ int32_t doMultiwayMerge(SOperatorInfo* pOperator, SSDataBlock** pResBlock) {
   int32_t code = TSDB_CODE_SUCCESS;
   int32_t lino = 0;
 
-  if (pOperator->status == OP_EXEC_DONE) {
+  if (pOperator->status == OP_EXEC_DONE && !pOperator->pOperatorGetParam) {
     return 0;
   }
 
@@ -531,7 +549,6 @@ int32_t doMultiwayMerge(SOperatorInfo* pOperator, SSDataBlock** pResBlock) {
   }
 
   if ((*pResBlock) != NULL) {
-    pOperator->resultInfo.totalRows += (*pResBlock)->info.rows;
     code = blockDataCheck(*pResBlock);
     QUERY_CHECK_CODE(code, lino, _end);
   } else {
@@ -570,6 +587,49 @@ int32_t getMultiwayMergeExplainExecInfo(SOperatorInfo* pOptr, void** pOptrExplai
   return code;
 }
 
+static int32_t resetMultiwayMergeOperState(SOperatorInfo* pOper) {
+  SMultiwayMergeOperatorInfo* pInfo = pOper->info;
+  SExecTaskInfo*           pTaskInfo = pOper->pTaskInfo;
+  SMergePhysiNode* pPhynode = (SMergePhysiNode*)pOper->pPhyNode;
+  pOper->status = OP_NOT_OPENED;
+
+  resetBasicOperatorState(&pInfo->binfo);
+  pInfo->groupId = 0;
+
+  OPTR_CLR_OPENED(pOper);
+
+  switch (pInfo->type) {
+    case MERGE_TYPE_SORT: {
+
+      SSortMergeInfo* pSortMergeInfo = &pInfo->sortMergeInfo;
+
+      blockDataCleanup(pSortMergeInfo->pInputBlock);
+
+      blockDataDestroy(pSortMergeInfo->pIntermediateBlock);
+      pSortMergeInfo->pIntermediateBlock = NULL;
+
+      tsortDestroySortHandle(pSortMergeInfo->pSortHandle);
+      pSortMergeInfo->pSortHandle = NULL;
+      pSortMergeInfo->prefetchedTuple = NULL;
+
+      pInfo->limitInfo = (SLimitInfo){0};
+      initLimitInfo(pPhynode->node.pLimit, pPhynode->node.pSlimit, &pInfo->limitInfo);
+      break;
+    }
+    case MERGE_TYPE_NON_SORT: {
+      pInfo->nsortMergeInfo = (SNonSortMergeInfo){0};
+      break;
+    }
+    case MERGE_TYPE_COLUMNS: {
+      break;
+    }
+    default:
+      qError("Invalid merge type: %d", pInfo->type);
+  }
+
+  return 0;
+}
+
 int32_t createMultiwayMergeOperatorInfo(SOperatorInfo** downStreams, size_t numStreams, SMergePhysiNode* pMergePhyNode,
                                         SExecTaskInfo* pTaskInfo, SOperatorInfo** pOptrInfo) {
   QRY_PARAM_CHECK(pOptrInfo);
@@ -584,7 +644,9 @@ int32_t createMultiwayMergeOperatorInfo(SOperatorInfo** downStreams, size_t numS
     code = terrno;
     goto _error;
   }
+  initOperatorCostInfo(pOperator);
 
+  pOperator->pPhyNode = pPhyNode;
   pInfo->groupMerge = pMergePhyNode->groupSort;
   pInfo->ignoreGroupId = pMergePhyNode->ignoreGroupId;
   pInfo->binfo.inputTsOrder = pMergePhyNode->node.inputTsOrder;
@@ -644,7 +706,7 @@ int32_t createMultiwayMergeOperatorInfo(SOperatorInfo** downStreams, size_t numS
 
       pColsMerge->pTargets = pMergePhyNode->pTargets;
       pColsMerge->sourceNum = numStreams;
-      pColsMerge->srcBlkIds = taosMemoryCalloc(numStreams, sizeof(uint64_t));
+      pColsMerge->srcBlkIds = taosMemoryCalloc(numStreams, sizeof(int64_t));
       for (size_t i = 0; i < numStreams; ++i) {
         pColsMerge->srcBlkIds[i] = getOperatorResultBlockId(downStreams[i], 0);
       }
@@ -662,6 +724,7 @@ int32_t createMultiwayMergeOperatorInfo(SOperatorInfo** downStreams, size_t numS
       createOperatorFpSet(openMultiwayMergeOperator, doMultiwayMerge, NULL, destroyMultiwayMergeOperatorInfo,
                           optrDefaultBufFn, getMultiwayMergeExplainExecInfo, optrDefaultGetNextExtFn, NULL);
 
+  setOperatorResetStateFn(pOperator, resetMultiwayMergeOperState);
   code = appendDownstream(pOperator, downStreams, numStreams);
   if (code != TSDB_CODE_SUCCESS) {
     goto _error;

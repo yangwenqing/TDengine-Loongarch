@@ -10,12 +10,19 @@ RED='\033[0;31m'
 GREEN='\033[1;32m'
 NC='\033[0m'
 
-MAIN_NAME="taosanode"
+PRODUCTPREFIX="taosanode"
 installDir="/usr/local/taos/taosanode"
-venv_dir="/usr/local/taos/taosanode/venv"
-serverName="${MAIN_NAME}d"
+dataDir="/var/lib/taos/taosanode"
+venv_list=(
+  "${dataDir}/venv"
+  "${dataDir}/timesfm_venv"
+  "${dataDir}/moirai_venv"
+  "${dataDir}/chronos_venv"
+  "${dataDir}/momentfm_venv"
+)
+serverName="${PRODUCTPREFIX}d"
 uninstallName="rmtaosanode"
-productName="TDengine Enterprise ANode"
+productName="TDengine TDgpt"
 
 if [ "$osType" != "Darwin" ]; then
   bin_link_dir="/usr/bin"
@@ -30,7 +37,7 @@ local_log_dir=${installDir}/log
 local_conf_dir=${installDir}/cfg
 local_model_dir=${installDir}/model
 
-global_log_dir="/var/log/taos/${MAIN_NAME}"
+global_log_dir="/var/log/taos/taosanode"
 global_conf_dir="/etc/taos/"
 
 service_config_dir="/etc/systemd/system"
@@ -72,7 +79,7 @@ kill_service_of() {
 }
 
 kill_model_service() {
-  for script in stop-tdtsfm.sh stop-timer-moe.sh; do
+  for script in stop-tdtsfm.sh stop-time-moe.sh; do
     script_path="${installDir}/bin/${script}"
     [ -f "${script_path}" ] && sudo bash "${script_path}" || :
   done
@@ -149,8 +156,8 @@ remove_model_service() {
   declare -A links=(
     ["start-tdtsfm"]="start-tdtsfm.sh"
     ["stop-tdtsfm"]="stop-tdtsfm.sh"
-    ["start-timer-moe"]="start-timer-moe.sh"
-    ["stop-timer-moe"]="stop-timer-moe.sh"
+    ["start-time-moe"]="start-time-moe.sh"
+    ["stop-time-moe"]="stop-time-moe.sh"
   )
 
   # Iterate over the array and create/remove links as needed
@@ -168,11 +175,15 @@ remove_service() {
 }
 
 function clean_venv() {
-  # Remove python virtual environment
-  #${csudo}rm ${venv_dir}/* || :
-  if [ ! -z "${venv_dir}" ]; then
-    echo -e "${csudo}rm -rf ${venv_dir}/*"
-  fi  
+  # Prompt the user to manually delete Python virtual environments if desired
+  echo "Please manually delete the following Python virtual environment directories if you no longer need them:"
+  for venv_dir in "${venv_list[@]}"; do
+    if [ -d "$venv_dir" ]; then
+      echo "  $venv_dir "
+      # echo "Removing venv: $venv_dir"
+      # ${csudo}rm -rf "$venv_dir" || :
+    fi
+  done
 }
 
 function clean_module() {
@@ -182,14 +193,14 @@ function clean_module() {
 }
 
 function clean_config() {
-  # Remove config file
+  # Remove global config file (taosanode.ini) but preserve local cfg directory
   if [ ! -z "${global_conf_dir}" ]; then
      ${csudo}rm -f ${global_conf_dir}/taosanode.ini || :
   fi
 
+  # Preserve local cfg directory (user configuration)
   if [ ! -z "${local_conf_dir}" ]; then
-     # shellcheck disable=SC2086
-     ${csudo}rm -rf ${local_conf_dir} || :
+     echo "Preserving configuration directory: ${local_conf_dir}"
   fi
 }
 

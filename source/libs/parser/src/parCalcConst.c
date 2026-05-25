@@ -325,7 +325,8 @@ typedef struct SIsUselessColCtx {
 
 EDealRes checkUselessCol(SNode* pNode, void* pContext) {
   SIsUselessColCtx* ctx = (SIsUselessColCtx*)pContext;
-  if (QUERY_NODE_FUNCTION == nodeType(pNode) && !fmIsScalarFunc(((SFunctionNode*)pNode)->funcId) &&
+  if (QUERY_NODE_FUNCTION == nodeType(pNode) &&
+      !fmIsScalarFunc(((SFunctionNode*)pNode)->funcId) &&
       !fmIsPseudoColumnFunc(((SFunctionNode*)pNode)->funcId)) {
     ctx->isUseless = false;
     return DEAL_RES_END;
@@ -440,12 +441,6 @@ static int32_t calcConstSelectFrom(SCalcConstContext* pCxt, SSelectStmt* pSelect
     code = calcConstList(pSelect->pPartitionByList);
   }
   if (TSDB_CODE_SUCCESS == code) {
-    code = calcConstList(pSelect->pTags);
-  }
-  if (TSDB_CODE_SUCCESS == code) {
-    code = calcConstNode(&pSelect->pSubtable);
-  }
-  if (TSDB_CODE_SUCCESS == code) {
     code = calcConstNode(&pSelect->pWindow);
   }
   if (TSDB_CODE_SUCCESS == code) {
@@ -457,15 +452,77 @@ static int32_t calcConstSelectFrom(SCalcConstContext* pCxt, SSelectStmt* pSelect
   if (TSDB_CODE_SUCCESS == code) {
     code = calcConstList(pSelect->pOrderByList);
   }
+  if (TSDB_CODE_SUCCESS == code) {
+    code = calcConstNode(&pSelect->pFill);
+  }
+  if (TSDB_CODE_SUCCESS == code) {
+    code = calcConstNode(&pSelect->pTimeRange);
+  }
+  return code;
+}
+
+
+static bool isEmptyResultQuery(SNode* pStmt) {
+  bool isEmptyResult = false;
+  switch (nodeType(pStmt)) {
+    case QUERY_NODE_SELECT_STMT:
+      isEmptyResult = ((SSelectStmt*)pStmt)->isEmptyResult;
+      break;
+    case QUERY_NODE_EXPLAIN_STMT:
+      isEmptyResult = isEmptyResultQuery(((SExplainStmt*)pStmt)->pQuery);
+      break;
+    case QUERY_NODE_SET_OPERATOR: {
+      SSetOperator* pSetOp = (SSetOperator*)pStmt;
+      isEmptyResult = isEmptyResultQuery(pSetOp->pLeft);
+      if (isEmptyResult) {
+        isEmptyResult = isEmptyResultQuery(pSetOp->pRight);
+      }
+      break;
+    }
+    case QUERY_NODE_DELETE_STMT:
+      isEmptyResult = ((SDeleteStmt*)pStmt)->deleteZeroRows;
+      break;
+    default:
+      break;
+  }
+  return isEmptyResult;
+}
+
+static int32_t calcSubQueries(SCalcConstContext* pCxt, SNodeList* pSubQueries) {
+  int32_t code = TSDB_CODE_SUCCESS;
+  SNode* pNode = NULL;
+  FOREACH(pNode, pSubQueries) {
+    code = calcConstQuery(pCxt, pNode, false);
+    if (code) {
+      break;
+    }
+/*
+    if (isEmptyResultQuery(pNode) && nodesIsScalarSubQuery(pNode)) {
+      // TODO
+      parserError("%" PRIx64 " scalar subquery got empty result", pCxt->pParseCxt->requestId);
+      code = TSDB_CODE_PAR_INVALID_SCALAR_SUBQ_RES_ROWS;
+      break;
+    }
+*/
+  }
+
   return code;
 }
 
 static int32_t calcConstSelect(SCalcConstContext* pCxt, SSelectStmt* pSelect, bool subquery) {
+  int32_t code = TSDB_CODE_SUCCESS;
+  
   if (NULL == pSelect->pFromTable) {
-    return calcConstSelectWithoutFrom(pCxt, pSelect, subquery);
+    code = calcConstSelectWithoutFrom(pCxt, pSelect, subquery);
   } else {
-    return calcConstSelectFrom(pCxt, pSelect, subquery);
+    code = calcConstSelectFrom(pCxt, pSelect, subquery);
   }
+
+  if (TSDB_CODE_SUCCESS == code && pSelect->pSubQueries && pSelect->pSubQueries->length > 0) {
+    code = calcSubQueries(pCxt, pSelect->pSubQueries);
+  }
+
+  return code;
 }
 
 static int32_t calcConstDelete(SCalcConstContext* pCxt, SDeleteStmt* pDelete) {
@@ -534,15 +591,45 @@ static bool notRefByOrderBy(SColumnNode* pCol, SNodeList* pOrderByList) {
   return !cxt.hasThisCol;
 }
 
-static bool isDistinctSubQuery(SNode* pNode) {
-  if (NULL == pNode) {
+/*
+ * @brief Check whether the projection column at `index` can be treated as
+ * useless for a subquery output. Rules:
+ *   SELECT: useless only when the statement is not DISTINCT and the indexed
+ *     projection is useless.
+ *   SET_OPERATOR:
+ *     UNION (distinct): never useless, because output depends on all
+ *       projected columns.
+ *     UNION ALL: useless only when both left and right branches are useless
+ *       at the same index (checked recursively).
+ * @param pStmt subquery node, expected to be SELECT or SET_OPERATOR.
+ * @param index zero-based projection position to check.
+ */
+static bool isSubqueryProjUseless(SNode* pStmt, int32_t index) {
+  if (NULL == pStmt || index < 0) {
     return false;
   }
-  switch (nodeType(pNode)) {
-    case QUERY_NODE_SELECT_STMT:
-      return ((SSelectStmt*)pNode)->isDistinct;
-    case QUERY_NODE_SET_OPERATOR:
-      return isDistinctSubQuery((((SSetOperator*)pNode)->pLeft)) || isDistinctSubQuery((((SSetOperator*)pNode)->pLeft));
+
+  switch (nodeType(pStmt)) {
+    case QUERY_NODE_SELECT_STMT: {
+      SSelectStmt* pSelect = (SSelectStmt*)pStmt;
+      if (pSelect->isDistinct) {
+        return false;
+      }
+      SNode* pProj = nodesListGetNode(pSelect->pProjectionList, index);
+      return (NULL != pProj) && isUselessCol((SExprNode*)pProj);
+    }
+    case QUERY_NODE_SET_OPERATOR: {
+      SSetOperator* pSetOp = (SSetOperator*)pStmt;
+      /*
+       * UNION (distinct) depends on all output columns,
+       * projection pruning is unsafe here.
+       */
+      if (pSetOp->opType == SET_OP_TYPE_UNION) {
+        return false;
+      }
+      return isSubqueryProjUseless(pSetOp->pLeft, index) &&
+             isSubqueryProjUseless(pSetOp->pRight, index);
+    }
     default:
       break;
   }
@@ -554,17 +641,8 @@ static bool isSetUselessCol(SSetOperator* pSetOp, int32_t index, SExprNode* pPro
     return false;
   }
 
-  SNodeList* pLeftProjs = getChildProjection(pSetOp->pLeft);
-  if (!isUselessCol((SExprNode*)nodesListGetNode(pLeftProjs, index)) || isDistinctSubQuery(pSetOp->pLeft)) {
-    return false;
-  }
-
-  SNodeList* pRightProjs = getChildProjection(pSetOp->pRight);
-  if (!isUselessCol((SExprNode*)nodesListGetNode(pRightProjs, index)) || isDistinctSubQuery(pSetOp->pLeft)) {
-    return false;
-  }
-
-  return true;
+  return isSubqueryProjUseless(pSetOp->pLeft, index) &&
+         isSubqueryProjUseless(pSetOp->pRight, index);
 }
 
 static int32_t calcConstSetOpProjections(SCalcConstContext* pCxt, SSetOperator* pSetOp, bool subquery) {
@@ -604,6 +682,10 @@ static int32_t calcConstSetOperator(SCalcConstContext* pCxt, SSetOperator* pSetO
   if (TSDB_CODE_SUCCESS == code) {
     code = calcConstList(pSetOp->pOrderByList);
   }
+  if (TSDB_CODE_SUCCESS == code && pSetOp->pSubQueries && pSetOp->pSubQueries->length > 0) {
+    code = calcSubQueries(pCxt, pSetOp->pSubQueries);
+  }
+  
   return code;
 }
 
@@ -632,31 +714,6 @@ static int32_t calcConstQuery(SCalcConstContext* pCxt, SNode* pStmt, bool subque
   return code;
 }
 
-static bool isEmptyResultQuery(SNode* pStmt) {
-  bool isEmptyResult = false;
-  switch (nodeType(pStmt)) {
-    case QUERY_NODE_SELECT_STMT:
-      isEmptyResult = ((SSelectStmt*)pStmt)->isEmptyResult;
-      break;
-    case QUERY_NODE_EXPLAIN_STMT:
-      isEmptyResult = isEmptyResultQuery(((SExplainStmt*)pStmt)->pQuery);
-      break;
-    case QUERY_NODE_SET_OPERATOR: {
-      SSetOperator* pSetOp = (SSetOperator*)pStmt;
-      isEmptyResult = isEmptyResultQuery(pSetOp->pLeft);
-      if (isEmptyResult) {
-        isEmptyResult = isEmptyResultQuery(pSetOp->pRight);
-      }
-      break;
-    }
-    case QUERY_NODE_DELETE_STMT:
-      isEmptyResult = ((SDeleteStmt*)pStmt)->deleteZeroRows;
-      break;
-    default:
-      break;
-  }
-  return isEmptyResult;
-}
 
 static void resetProjectNullTypeImpl(SNodeList* pProjects) {
   SNode* pProj = NULL;
@@ -665,6 +722,9 @@ static void resetProjectNullTypeImpl(SNodeList* pProjects) {
     if (TSDB_DATA_TYPE_NULL == pExpr->resType.type) {
       pExpr->resType.type = TSDB_DATA_TYPE_VARCHAR;
       pExpr->resType.bytes = VARSTR_HEADER_SIZE;
+      if (QUERY_NODE_VALUE == nodeType(pExpr)) {
+        ((SValueNode*)pExpr)->isNull = true;
+      }
     }
   }
 }
@@ -688,18 +748,29 @@ static void resetProjectNullType(SNode* pStmt) {
   }
 }
 
+static int32_t rewriteScalarSubQResValue(SParseContext* pParseCxt, SQuery* pQuery) {
+  // TODO
+  return TSDB_CODE_SUCCESS;
+}
+
 int32_t calculateConstant(SParseContext* pParseCxt, SQuery* pQuery) {
   SCalcConstContext cxt = {.pParseCxt = pParseCxt,
                            .msgBuf.buf = pParseCxt->pMsg,
                            .msgBuf.len = pParseCxt->msgLen,
                            .code = TSDB_CODE_SUCCESS};
 
-  int32_t code = calcConstQuery(&cxt, pQuery->pRoot, false);
+  int32_t code = TSDB_CODE_SUCCESS;
+
+  if (TSDB_CODE_SUCCESS == code) {
+    code = calcConstQuery(&cxt, pQuery->pRoot, false);
+  }
   if (TSDB_CODE_SUCCESS == code) {
     resetProjectNullType(pQuery->pRoot);
     if (isEmptyResultQuery(pQuery->pRoot)) {
       pQuery->execMode = QUERY_EXEC_MODE_EMPTY_RESULT;
     }
+    code = rewriteScalarSubQResValue(pParseCxt, pQuery);
   }
+  
   return code;
 }

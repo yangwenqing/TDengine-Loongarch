@@ -1,6 +1,5 @@
 ---
 title: Fault Tolerance and Disaster Recovery
-slug: /operations-and-maintenance/fault-tolerance-and-disaster-recovery
 ---
 
 To prevent data loss and accidental deletion, TDengine provides comprehensive data backup, recovery, fault tolerance, and real-time data synchronization across different locations to ensure the security of data storage. This section briefly explains fault tolerance and disaster recovery in TDengine.
@@ -30,6 +29,4 @@ The following steps describe how to easily set up a data disaster recovery syste
 
 - Step 5: Add a data synchronization task on the "System Management - Data Synchronization" page of the taosExplorer service, fill in the configuration information of the task with the database db1 to be synchronized and the target database db2's DSN, and start data synchronization after creating the task.
 
-- Step 6: Access Cluster B, and you can see that the database db2 in Cluster B continuously writes data from the database db1 in Cluster A until the data volumes of the databases in both clusters are roughly equal. At this point, a simple data disaster recovery system based on
-
-TDengine Enterprise is set up.
+- Step 6: Access Cluster B, and you can see that the database db2 in Cluster B continuously writes data from the database db1 in Cluster A until the data volumes of the databases in both clusters are roughly equal. At this point, a simple data disaster recovery system based on TDengine Enterprise is set up.

@@ -503,7 +503,10 @@ class TDCom:
     def getBuildPath(self):
         selfPath = os.path.dirname(os.path.realpath(__file__))
 
-        if ("community" in selfPath):
+        if ("taos-community" in selfPath):
+            # tsdb repo layout: /mnt/tsdb/source/taos-community/tests/...
+            projPath = selfPath[:selfPath.find("source/taos-community")]
+        elif ("community" in selfPath):
             projPath = selfPath[:selfPath.find("community")]
         else:
             projPath = selfPath[:selfPath.find("tests")]
@@ -842,7 +845,7 @@ class TDCom:
         if (platform.system().lower() == 'windows'):
             os.system("TASKKILL /F /IM %s.exe"%processorName)
         else:
-            os.system("unset LD_PRELOAD; pkill %s " % processorName)
+            os.system("unset LD_PRELOAD; pkill -9 %s " % processorName)
 
     def gen_tag_col_str(self, gen_type, data_type, count):
         """

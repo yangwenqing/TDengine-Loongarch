@@ -1,19 +1,8 @@
 ---
 title: OPC DA
-slug: /advanced-features/data-connectors/opc-da
 ---
 
-import Image from '@theme/IdealImage';
-import imgStep1 from '../../assets/opc-da-01.png';
-import imgStep2 from '../../assets/opc-da-02.png';
-import imgStep3 from '../../assets/opc-da-03.png';
-import imgStep4 from '../../assets/opc-da-04.png';
-import imgStep5 from '../../assets/opc-da-05.png';
-import imgStep6 from '../../assets/opc-da-06.png';
-import imgStep7 from '../../assets/opc-da-07.png';
-import imgStep8 from '../../assets/opc-da-08.png';
-
-import Enterprise from '../../assets/resources/_enterprise.mdx';
+import { AddDataSource, Enterprise } from '../../assets/resources/_resources.mdx';
 
 <Enterprise/>
 
@@ -27,45 +16,25 @@ OPC DA (Data Access) is a classic COM-based specification, only applicable to Wi
 
 TDengine can efficiently read data from OPC-DA servers and write it to TDengine, achieving real-time data storage.
 
-## Creating a Task
+## Procedure
 
-### 1. Add a Data Source
+### Add a Data Source
 
-On the data writing page, click the **+Add Data Source** button to enter the add data source page.
+<AddDataSource connectorName="OPC DA"/>
 
-<figure>
-<Image img={imgStep1} alt=""/>
-</figure>
-
-### 2. Configure Basic Information
-
-Enter the task name in **Name**, for example, for environmental temperature and humidity monitoring, name it **environment-monitoring**.
-
-Select **OPC-DA** from the **Type** dropdown list.
-
-If the taosX service is running on the same server as OPC-DA, **Proxy** is not necessary; otherwise, configure **Proxy**: select a specified proxy from the dropdown, or click the **+Create New Proxy** button on the right to create a new proxy and follow the prompts to configure the proxy.
-
-Select a target database from the **Target Database** dropdown list, or click the **+Create Database** button on the right to create a new database.
-
-<figure>
-<Image img={imgStep2} alt=""/>
-</figure>
-
-### 3. Configure Connection Information
+### Configure Connection Information
 
 Fill in the **OPC-DA Service Address** in the **Connection Configuration** area, for example: `127.0.0.1/Matrikon.OPC.Simulation.1`, and configure the authentication method.
 
 Click the **Connectivity Check** button to check if the data source is available.
 
-<figure>
-<Image img={imgStep3} alt=""/>
-</figure>
+![Configure connection information](../../assets/opc-da-03.png)
 
-### 4. Configure Points Set
+### Configure Points Set
 
 **Points Set** can choose to use a CSV file template or **Select All Points**.
 
-#### 4.1. Upload CSV Configuration File
+#### Upload CSV Configuration File
 
 You can download the CSV blank template and configure the point information according to the template, then upload the CSV configuration file to configure the points; or download the data points according to the configured filter conditions, and download them in the format specified by the CSV template.
 
@@ -79,7 +48,7 @@ The encoding format of the CSV file uploaded by the user must be one of the foll
 
 (2) UTF-8 (i.e., UTF-8 without BOM)
 
-2. Header Configuration Rules
+1. Header Configuration Rules
 
 The header is the first line of the CSV file, with the following rules:
 
@@ -111,7 +80,7 @@ The header is the first line of the CSV file, with the following rules:
 
 (5) In the CSV Header, columns that are not listed in the table above, such as: serial number, will be automatically ignored.
 
-3. Row Configuration Rules
+1. Row Configuration Rules
 
 Each Row in the CSV file configures an OPC data point. The rules for Rows are as follows:
 
@@ -139,7 +108,7 @@ Each Row in the CSV file configures an OPC data point. The rules for Rows are as
 
 (3) When `tag_name` is different but `tbname` is the same, `value_col` must be different. This configuration allows data from multiple data points of different types to be written to different columns in the same subtable. This corresponds to the "OPC data into TDengine wide table" scenario.
 
-4. Other Rules
+1. Other Rules
 
 (1) If the number of columns in Header and Row are not consistent, validation fails, and the user is prompted with the line number that does not meet the requirements;
 
@@ -147,7 +116,7 @@ Each Row in the CSV file configures an OPC data point. The rules for Rows are as
 
 (3) Row must have more than 1 line;
 
-#### 4.2. Selecting Data Points
+#### Selecting Data Points
 
 Data points can be filtered by configuring the **Root Node ID** and **Regular Expression**.
 
@@ -155,17 +124,13 @@ Configure **Supertable Name** and **Table Name** to specify the supertable and s
 
 Configure **Primary Key Column**, choosing `origin_ts` to use the original timestamp of the OPC data point as the primary key in TDengine; choosing `request_ts` to use the timestamp when the data is request as the primary key; choosing `received_ts` to use the timestamp when the data is received as the primary key. Configure **Primary Key Alias** to specify the name of the TDengine timestamp column.
 
-<figure>
-<Image img={imgStep4} alt=""/>
-</figure>
+![Configure data sets](../../assets/opc-da-04.png)
 
-### 5. Collection Configuration
+### Collection Configuration
 
 In the collection configuration, set the current task's collection interval, connection timeout, and collection timeout.
 
-<figure>
-<Image img={imgStep5} alt=""/>
-</figure>
+![Configure collection settings](../../assets/opc-da-05.png)
 
 As shown in the image:
 
@@ -181,11 +146,9 @@ When using **Select Data Points** in the **Data Point Set**, the collection conf
   - Update: Enable dynamic data point updates, append or delete;
 - Data Point Update Interval: Effective when "Data Point Update Mode" is `Append` and `Update`. Unit: seconds, default value is 600, minimum value: 60, maximum value: 2147483647.
 
-### 6. Advanced Options
+### Advanced Options
 
-<figure>
-<Image img={imgStep6} alt=""/>
-</figure>
+![Configure advanced options](../../assets/opc-da-06.png)
 
 As shown above, configure advanced options for more detailed optimization of performance, logs, etc.
 
@@ -205,25 +168,13 @@ In **Maximum Retention Days**, set the maximum retention days for raw data.
 
 In **Raw Data Storage Directory**, set the path for saving raw data. If using Agent, the storage path refers to the path on the server where Agent is located, otherwise it is on the taosX server. The path can include placeholders `$DATA_DIR` and `:id` as part of the path.
 
-- On Linux platform, `$DATA_DIR` is /var/lib/taos/taosx, by default the storage path is `/var/lib/taos/taosx/tasks/<task_id>/rawdata`.
-- On Windows platform, `$DATA_DIR` is C:\TDengine\data\taosx, by default the storage path is `C:\TDengine\data\taosx\tasks\<task_id>\rawdata`.
+- On Linux platform, `$DATA_DIR` is `/var/lib/taos/taosx`, by default the storage path is `/var/lib/taos/taosx/tasks/<task_id>/rawdata`.
+- On Windows platform, `$DATA_DIR` is `C:\TDengine\data\taosx`, by default the storage path is `C:\TDengine\data\taosx\tasks\<task_id>\rawdata`.
 
-### 7. Completion
+### Completion
 
 Click the **Submit** button to complete the creation of the OPC DA to TDengine data synchronization task, return to the **Data Source List** page to view the task execution status.
 
 ## Add Data Points
 
-During the task execution, click **Edit**, then click the **Add Data Points** button to append data points to the CSV file.
-
-<figure>
-<Image img={imgStep7} alt=""/>
-</figure>
-
-In the pop-up form, fill in the information for the data points.
-
-<figure>
-<Image img={imgStep8} alt=""/>
-</figure>
-
-Click the **Confirm** button to complete the addition of data points.
+During the task execution, click **Edit**, then click the **Add Data Points** button to append data points to the CSV file. In the pop-up form, fill in the information for the data points. Then click the **Confirm** button to complete the addition of data points.

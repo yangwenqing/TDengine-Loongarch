@@ -1,22 +1,44 @@
 ---
 sidebar_label: ODBC
 title: ODBC Client Library
-slug: /tdengine-reference/client-libraries/odbc
 ---
-
-import Image from '@theme/IdealImage';
-import imgStep01 from '../../assets/odbc-01.png';
-import imgStep02 from '../../assets/odbc-02.png';
 
 TDengine ODBC is an ODBC driver implemented for TDengine, supporting applications on Windows systems (such as [PowerBI](https://powerbi.microsoft.com/) and others) as well as user-customized applications to access TDengine databases locally, remotely, and via cloud services through the ODBC standard interface.
 
 TDengine ODBC offers two types of connections to the TDengine database: WebSocket (recommended) and native connections. Different connection methods can be set for the TDengine data source when in use. WebSocket connection must be used when accessing cloud services.
 
-TDengine ODBC provides both 64-bit and 32-bit drivers. However, the 32-bit version is only supported by the enterprise edition and only supports WebSocket connections.  
-**Note:**
+TDengine ODBC provides both 64-bit and 32-bit drivers. However, the 32-bit version is only supported by the TSDB-Enterprise and only supports WebSocket connections.
+
+:::note
 
 - Driver Manager: Ensure to use the ODBC driver manager that matches the architecture of the application. 32-bit applications need a 32-bit ODBC driver manager, and 64-bit applications need a 64-bit ODBC driver manager.
 - Data Source Name (DSN): Both 32-bit and 64-bit ODBC driver managers can see all DSNs, and DSNs under the User DSN tab will share the same name, so it is necessary to distinguish them in the DSN name.
+
+:::
+
+:::warning Native Connection Being Deprecated
+
+<font color="red">ODBC native connection is deprecated and will be discontinued on 2027-01-01</font>, please migrate to WebSocket connection.
+
+For a detailed migration guide, please refer to: [Connection Methods](index.md#connection-methods)
+
+:::
+
+:::info About Native Connection
+
+The ODBC driver's **Native connection** communicates directly with the TDengine server through the TDengine client driver (`taosnative` library) using TDengine's proprietary protocol. This differs from the **WebSocket connection**, which accesses the server via taosAdapter's WebSocket interface.
+
+- Native connections typically offer better performance but require the client driver version to match the server version.
+- WebSocket connections provide better compatibility, generally do not require client updates when upgrading the server, and support cloud services and 32-bit applications.
+- For most scenarios, WebSocket connections are recommended. For detailed connection method descriptions, please refer to: [Connection Methods](index.md#connection-methods)
+
+:::
+
+:::warning Native and WebSocket Connections Cannot Be Mixed
+
+Native connections and WebSocket connections **cannot be used simultaneously within the same process, and switching between them at runtime is not allowed**. A single process can only use one connection type. If you need to use both connection types, please use them in separate processes.
+
+:::
 
 ## ODBC Version Compatibility
 
@@ -44,6 +66,8 @@ TDengine ODBC supports two ways to connect to the TDengine database: WebSocket c
 
 5. For general users, it is recommended to use the **WebSocket** connection mode, as the performance difference with Native is not significant, and compatibility is better.
 
+6. Native connections and WebSocket connections **cannot be used simultaneously within the same process, and switching between them at runtime is not allowed**. A single process can only use one connection type. Please determine the required connection type when creating the data source.
+
 ### WebSocket Connection
 
 1. Search and open the **ODBC Data Sources (32-bit)** or **ODBC Data Sources (64-bit)** management tool from the **Start** menu
@@ -54,9 +78,7 @@ TDengine ODBC supports two ways to connect to the TDengine database: WebSocket c
 
 4. Click finish, enter the TDengine ODBC data source configuration page, fill in the following necessary information
 
-    <figure>
-    <Image img={imgStep01} alt=""/>
-    </figure>
+    ![Configure TDengine data source with WebSocket connection](../../assets/odbc-01.png)
 
     4.1 **DSN**: Data Source Name, required, name the newly added ODBC data source
 
@@ -70,7 +92,7 @@ TDengine ODBC supports two ways to connect to the TDengine database: WebSocket c
 
     4.6 **Password**: Optional, for use in step 5 connection testing only, database user password, if not specified, TDengine defaults to taosdata
 
-    4.7 **Compatible Software**: Supports compatibility adaptation for industrial software such as KingSCADA, Kepware, etc., usually, the default value General is sufficient
+    4.7 **Compatible Software**: Supports compatibility adaptation for industrial software such as KingSCADA, Kepware, etc., with ADO support included. Usually, the default value General is sufficient for most scenarios
 
 5. Click **Test Connection** to test the connection status. If successful, a "Successfully connected to URL" message will appear.
 
@@ -88,9 +110,7 @@ TDengine ODBC supports two ways to connect to the TDengine database: WebSocket c
 
 4. Click finish to enter the TDengine ODBC data source configuration page, fill in the necessary information as follows:
 
-    <figure>
-    <Image img={imgStep02} alt=""/>
-    </figure>
+    ![Configure TDengine data source with native connection](../../assets/odbc-02.png)
 
     4.1 **DSN**: Data Source Name is required, name the newly added ODBC data source.
 
@@ -104,7 +124,7 @@ TDengine ODBC supports two ways to connect to the TDengine database: WebSocket c
 
     4.6 **Password**: Optional, used only for testing the connection in step 5, database user password, if not specified, TDengine defaults to taosdata.
 
-    4.7 **Compatible Software**: Supports compatibility adaptation for industrial software such as KingSCADA, Kepware, etc. Usually, the default value General is sufficient.
+    4.7 **Compatible Software**: Supports compatibility adaptation for industrial software such as KingSCADA, Kepware, etc., with ADO support included. Usually, the default value General is sufficient for most scenarios.
 
 5. Click **Test Connection** to test the connection status. If successful, a "Connection successful" message will appear.
 
@@ -121,6 +141,7 @@ In addition to this, the WebSocket connection method also supports 32-bit applic
 
 | taos_odbc Version | Major Changes                                                                                             |   TDengine Version    |
 | -----------  | --------------------------------------------------------------------------------------------------  | ----------------  |
+|      v1.1.1   | Support ADO access to TDengine ODBC 32/64 interface. | 3.3.3.0 and higher |
 |      v1.1.0   | 1. Supports view functionality. <br/>2. Supports VARBINARY/GEOMETRY data types. <br/>3. Supports ODBC 32-bit WebSocket connection method (Enterprise edition only). <br/>4. Supports ODBC data source configuration dialog settings for compatibility adaptation options for industrial software like KingSCADA, Kepware, etc. (Enterprise edition only). | 3.3.3.0 and higher |
 |      v1.0.2   | Supports CP1252 character encoding.                                                                                 | 3.2.3.0 and higher |
 |      v1.0.1   | 1. Supports DSN settings for BI mode, in BI mode TDengine database does not return system database and supertable subtable information. <br/>2. Refactored character set conversion module, improving read and write performance. <br/> 3. Default connection method in ODBC data source configuration dialog changed to "WebSocket". <br/>4. Added "Test Connection" control in ODBC data source configuration dialog. <br/>5. ODBC data source configuration supports Chinese/English interface. |         -          |
@@ -249,7 +270,7 @@ The table below explains how the ODBC connector maps server data types to defaul
 | SQL_ATTR_TRANSLATE_LIB | |
 | SQL_ATTR_TRANSLATE_OPTION | |
 
-- **Enable any programming language with ODBC-bindings/ODBC-plugings to communicate with TDengine:**
+- **Enable any programming language with ODBC-bindings/ODBC-plugings to communicate with TDengine**
 
 | programming language | ODBC-API or bindings/plugins |
 | :----- | :---- |
@@ -273,12 +294,12 @@ This section summarizes the ODBC API by functionality. For a complete ODBC API r
   - **Supported**: Yes (Windows only)
   - **Standard**: ODBC
   - **Function**: Configures data sources
-  
+
 - API: ConfigDriver
   - **Supported**: Yes (Windows only)
   - **Standard**: ODBC
   - **Function**: Used to perform installation and configuration tasks related to a specific driver
-  
+
 - API: ConfigTranslator
   - **Supported**: No
   - **Standard**: ODBC
@@ -643,4 +664,3 @@ This section summarizes the ODBC API by functionality. For a complete ODBC API r
   - **Support**: Supported
   - **Standard**: ODBC
   - **Function**: Closes the cursor associated with the current statement handle and releases all resources used by the cursor
-

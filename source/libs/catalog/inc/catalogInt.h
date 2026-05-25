@@ -26,6 +26,7 @@ extern "C" {
 #include "tcommon.h"
 #include "tglobal.h"
 #include "ttimer.h"
+#include "streamMsg.h"
 
 #define CTG_DEFAULT_CACHE_CLUSTER_NUMBER 6
 #define CTG_DEFAULT_CACHE_VGROUP_NUMBER  100
@@ -49,6 +50,8 @@ extern "C" {
 #define CTG_ERR_CODE_TABLE_NOT_EXIST TSDB_CODE_PAR_TABLE_NOT_EXIST
 
 #define CTG_BATCH_FETCH 1
+
+#define CATLOG_TIMEOUT 60000
 
 typedef enum {
   CTG_CI_CLUSTER = 0,
@@ -134,8 +137,8 @@ typedef enum {
   CTG_TASK_GET_TB_TSMA,
   CTG_TASK_GET_TSMA,
   CTG_TASK_GET_TB_NAME,
-  CTG_TASK_GET_V_SUBTABLES,
   CTG_TASK_GET_V_STBREFDBS,
+  CTG_TASK_GET_RSMA,
 } CTG_TASK_TYPE;
 
 typedef enum {
@@ -161,9 +164,11 @@ typedef struct SCtgCacheStat {
 
 typedef struct SCtgAuthReq {
   SRequestConnInfo* pConn;
+  SPrivInfo*        privInfo;
   SUserAuthInfo*    pRawReq;
+  SHashObj*         tbPrivs;
   SGetUserAuthRsp   authInfo;
-  AUTH_TYPE         singleType;
+  EPrivType         singleType;
   bool              onlyCache;
   bool              tbNotExists;
 } SCtgAuthReq;
@@ -171,6 +176,7 @@ typedef struct SCtgAuthReq {
 typedef struct SCtgAuthRsp {
   SUserAuthRes* pRawRes;
   bool          metaNotExists;
+  bool          withInsertCond;
 } SCtgAuthRsp;
 
 typedef struct SCtgTbCacheInfo {
@@ -297,7 +303,6 @@ typedef struct SCtgTSMAFetch {
   // stream progress
   int32_t subFetchNum;
   int32_t finishedSubFetchNum;
-  int32_t vgNum;
 
   // tb tsma
   SName tsmaSourceTbName;
@@ -310,23 +315,8 @@ typedef struct SCtgTbTSMACtx {
   SArray* pFetches;
 } SCtgTbTSMACtx;
 
-typedef struct SCtgVSubTablesCtx {
-  SArray* pNames;
-
-  STableMeta* pMeta;
- 
-  int32_t vgNum;
-  bool    clonedVgroups;
-  SArray* pVgroups;
-
-  int32_t         resCode;
-  int32_t         resDoneNum;
-  SVSubTablesRsp* pResList;
-  int32_t         resIdx;
-} SCtgVSubTablesCtx;
-
 typedef struct SCtgVStbRefDbsCtx {
-  SArray*         pNames;
+  SName*          pNames;
 
   STableMeta*     pMeta;
 
@@ -335,7 +325,7 @@ typedef struct SCtgVStbRefDbsCtx {
   SArray*         pVgroups;
   int32_t         resCode;
   int32_t         resDoneNum;
-  SVStbRefDbsRsp* pResList;
+  SArray*         pResList;
   int32_t         resIdx;
 } SCtgVStbRefDbsCtx;
 
@@ -465,7 +455,6 @@ typedef struct SCtgJob {
   int32_t          tbTsmaNum;
   int32_t          tsmaNum;  // currently, only 1 is possible
   int32_t          tbNameNum;
-  int32_t          vsubTbNum;
   int32_t          vstbRefDbNum;
 } SCtgJob;
 
@@ -1044,7 +1033,7 @@ void    ctgdShowClusterCache(SCatalog* pCtg);
 int32_t ctgdShowCacheInfo(void);
 int32_t ctgdShowStatInfo(void);
 
-int32_t ctgRemoveTbMetaFromCache(SCatalog* pCtg, SName* pTableName, bool syncReq);
+int32_t ctgRemoveTbMetaFromCache(SCatalog* pCtg, SName* pTableName, bool syncReq, bool related);
 int32_t ctgGetTbMetaFromCache(SCatalog* pCtg, SCtgTbMetaCtx* ctx, STableMeta** pTableMeta);
 int32_t ctgGetTbMetasFromCache(SCatalog* pCtg, SRequestConnInfo* pConn, SCtgTbMetasCtx* ctx, int32_t dbIdx,
                                int32_t* fetchIdx, int32_t baseResIdx, SArray* pList, bool autoCreate);
@@ -1067,9 +1056,10 @@ void    ctgReleaseDBCache(SCatalog* pCtg, SCtgDBCache* dbCache);
 void    ctgRUnlockVgInfo(SCtgDBCache* dbCache);
 int32_t ctgTbMetaExistInCache(SCatalog* pCtg, const char* dbFName, const char* tbName, int32_t* exist);
 int32_t ctgReadTbMetaFromCache(SCatalog* pCtg, SCtgTbMetaCtx* ctx, STableMeta** pTableMeta);
-int32_t ctgReadTbVerFromCache(SCatalog* pCtg, SName* pTableName, int32_t* sver, int32_t* tver, int32_t* tbType,
+int32_t ctgReadTbVerFromCache(SCatalog* pCtg, SName* pTableName, int32_t* sver, int32_t* tver, int32_t *rver, int32_t* tbType,
                               uint64_t* suid, char* stbName);
 int32_t ctgChkAuthFromCache(SCatalog* pCtg, SUserAuthInfo* pReq, bool tbNotExists, bool* inCache, SCtgAuthRsp* pRes);
+int32_t ctgGetUserAuthFromCache(SCatalog* pCtg, const char* user, bool* inCache, SGetUserAuthRsp* pRes);
 int32_t ctgDropDbCacheEnqueue(SCatalog* pCtg, const char* dbFName, int64_t dbId);
 int32_t ctgDropDbVgroupEnqueue(SCatalog* pCtg, const char* dbFName, bool syncReq);
 int32_t ctgDropStbMetaEnqueue(SCatalog* pCtg, const char* dbFName, int64_t dbId, const char* stbName, uint64_t suid,
@@ -1132,6 +1122,10 @@ int32_t ctgGetTbMetaFromMnodeImpl(SCatalog* pCtg, SRequestConnInfo* pConn, const
                                   STableMetaOutput* out, SCtgTaskReq* tReq);
 int32_t ctgGetTbMetaFromMnode(SCatalog* pCtg, SRequestConnInfo* pConn, const SName* pTableName, STableMetaOutput* out,
                               SCtgTaskReq* tReq);
+int32_t ctgGetRsmaMetaFromMnode(SCatalog* pCtg, SRequestConnInfo* pConn, const char* name, SRsmaMetaOutput* out,
+                                SCtgTaskReq* tReq);
+int32_t ctgGetStreamCreateSqlFromMnode(SCatalog* pCtg, SRequestConnInfo* pConn, const char* streamFName,
+                                       SGetStreamCreateSqlRsp* out);
 int32_t ctgGetTbMetaFromVnode(SCatalog* pCtg, SRequestConnInfo* pConn, const SName* pTableName, SVgroupInfo* vgroupInfo,
                               STableMetaOutput* out, SCtgTaskReq* tReq);
 int32_t ctgGetTableCfgFromVnode(SCatalog* pCtg, SRequestConnInfo* pConn, const SName* pTableName,
@@ -1149,7 +1143,6 @@ int32_t ctgLaunchJob(SCtgJob* pJob);
 int32_t ctgMakeAsyncRes(SCtgJob* pJob);
 int32_t ctgLaunchSubTask(SCtgTask** ppTask, CTG_TASK_TYPE type, ctgSubTaskCbFp fp, void* param);
 int32_t ctgGetTbCfgCb(SCtgTask* pTask);
-int32_t ctgGetVSubTablesCb(SCtgTask* pTask);
 int32_t ctgGetVStbRefDbsCb(SCtgTask* pTask);
 void    ctgFreeHandle(SCatalog* pCatalog);
 
@@ -1192,7 +1185,7 @@ void    ctgFreeQNode(SCtgQNode* node);
 void    ctgClearHandle(SCatalog* pCtg);
 void    ctgFreeTbCacheImpl(SCtgTbCache* pCache, bool lock);
 void    ctgFreeViewCacheImpl(SCtgViewCache* pCache, bool lock);
-int32_t ctgRemoveTbMeta(SCatalog* pCtg, SName* pTableName);
+int32_t ctgRemoveTbMeta(SCatalog* pCtg, SName* pTableName, bool related);
 int32_t ctgRemoveCacheUser(SCatalog* pCtg, SCtgUserAuth* pUser, const char* user);
 int32_t ctgGetTbHashVgroup(SCatalog* pCtg, SRequestConnInfo* pConn, const SName* pTableName, SVgroupInfo* pVgroup,
                            bool* exists);
@@ -1201,7 +1194,6 @@ int32_t ctgdGetOneHandle(SCatalog** pHandle);
 int     ctgVgInfoComp(const void* lp, const void* rp);
 int32_t ctgMakeVgArray(SDBVgInfo* dbInfo, const char* dbName, bool isFullName);
 int32_t ctgMakeVgArraySortBy(SDBVgInfo* dbInfo, __compar_fn_t sort_func);
-int32_t ctgChkSetAuthRes(SCatalog* pCtg, SCtgAuthReq* req, SCtgAuthRsp* res);
 int32_t ctgReadDBCfgFromCache(SCatalog* pCtg, const char* dbFName, SDbCfgInfo* pDbCfg);
 
 int32_t ctgAcquireVgMetaFromCache(SCatalog* pCtg, const char* dbFName, const char* tbName, SCtgDBCache** pDb,
@@ -1246,14 +1238,11 @@ uint64_t ctgGetTbTSMACacheSize(STSMACache* pTsmaInfo);
 void     ctgFreeTbTSMAInfo(void* p);
 bool     hasOutOfDateTSMACache(SArray* pTsmas);
 bool     isCtgTSMACacheOutOfDate(STSMACache* pTsmaCache);
-int32_t  ctgGetStreamProgressFromVnode(SCatalog* pCtg, SRequestConnInfo* pConn, const SName* pTbName,
-                                       SVgroupInfo* vgroupInfo, SStreamProgressRsp* out, SCtgTaskReq* tReq,
-                                       void* bInput);
-int32_t ctgGetVSubTablesFromVnode(SCatalog* pCtg, SRequestConnInfo* pConn, int64_t suid, SVgroupInfo* vgroupInfo, SCtgTaskReq* tReq);
+int32_t  ctgGetStreamProgressFromMnode(SCatalog* pCtg, SRequestConnInfo* pConn, const SName* pTbName, SStreamProgressRsp* out, SCtgTaskReq* tReq,
+                                       void* bInput, int32_t nodeId);
 int32_t ctgGetVStbRefDbsFromVnode(SCatalog* pCtg, SRequestConnInfo* pConn, int64_t suid, SVgroupInfo* vgroupInfo, SCtgTaskReq* tReq);
 int32_t ctgAddTSMAFetch(SArray** pFetchs, int32_t dbIdx, int32_t tbIdx, int32_t* fetchIdx, int32_t resIdx, int32_t flag,
                         CTG_TSMA_FETCH_TYPE fetchType, const SName* sourceTbName);
-int32_t ctgBuildNormalChildVtbList(SCtgVSubTablesCtx* pCtx);                        
 int32_t ctgOpUpdateDbTsmaVersion(SCtgCacheOperation* pOper);
 int32_t ctgUpdateDbTsmaVersionEnqueue(SCatalog* pCtg, int32_t tsmaVersion, const char* dbFName, int64_t dbId,
                                       bool syncOper);

@@ -47,6 +47,7 @@ static int32_t mndInsInitMeta(SHashObj *hash) {
   meta.tableType = TSDB_SYSTEM_TABLE;
   meta.sversion = 1;
   meta.tversion = 1;
+  meta.rversion = 1;
   meta.virtualStb = false;
 
   size_t               size = 0;
@@ -57,6 +58,7 @@ static int32_t mndInsInitMeta(SHashObj *hash) {
     tstrncpy(meta.tbName, pInfosTableMeta[i].name, sizeof(meta.tbName));
     meta.numOfColumns = pInfosTableMeta[i].colNum;
     meta.sysInfo = pInfosTableMeta[i].sysInfo;
+    meta.privCat = pInfosTableMeta[i].privCat;
 
     TAOS_CHECK_RETURN(mndInitInfosTableSchema(pInfosTableMeta[i].schema, pInfosTableMeta[i].colNum, &meta.pSchemas));
 
@@ -90,12 +92,14 @@ int32_t mndBuildInsTableSchema(SMnode *pMnode, const char *dbFName, const char *
     TAOS_RETURN(code);
   }
 
-  bool isShowAnodes = (strcmp(tbName, TSDB_INS_TABLE_ANODES) == 0 || strcmp(tbName, TSDB_INS_TABLE_ANODES_FULL) == 0);
-
-  if (!isShowAnodes && !sysinfo && pMeta->sysInfo) {
-    mError("no permission to get schema of table name:%s", tbName);
-    code = TSDB_CODE_PAR_PERMISSION_DENIED;
-    TAOS_RETURN(code);
+  if (!sysinfo && pMeta->sysInfo) {
+    if (!(strcmp(tbName, TSDB_INS_TABLE_ANODES) == 0 || strcmp(tbName, TSDB_INS_TABLE_ANODES_FULL) == 0 ||
+          strcmp(tbName, TSDB_INS_TABLE_XNODES) == 0 || strcmp(tbName, TSDB_INS_TABLE_XNODES_FULL) == 0 ||
+          strcmp(tbName, TSDB_INS_TABLE_LICENCES) == 0)) {
+      mError("no permission to get schema of table name:%s", tbName);
+      code = TSDB_CODE_PAR_PERMISSION_DENIED;
+      TAOS_RETURN(code);
+    }
   }
 
   *pRsp = *pMeta;
@@ -148,7 +152,9 @@ int32_t mndBuildInsTableCfg(SMnode *pMnode, const char *dbFName, const char *tbN
 }
 
 int32_t mndInitInfos(SMnode *pMnode) {
-  pMnode->infosMeta = taosHashInit(20, taosGetDefaultHashFunction(TSDB_DATA_TYPE_VARCHAR), false, HASH_NO_LOCK);
+  size_t size = 0;
+  getInfosDbMeta(NULL, &size);
+  pMnode->infosMeta = taosHashInit(size, taosGetDefaultHashFunction(TSDB_DATA_TYPE_VARCHAR), false, HASH_NO_LOCK);
   if (pMnode->infosMeta == NULL) {
     TAOS_RETURN(TSDB_CODE_OUT_OF_MEMORY);
   }

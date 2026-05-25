@@ -506,7 +506,10 @@ class TDCom:
     def getBuildPath(self):
         selfPath = os.path.dirname(os.path.realpath(__file__))
 
-        if ("community" in selfPath):
+        if ("taos-community" in selfPath):
+            # tsdb repo layout: /mnt/tsdb/source/taos-community/tests/...
+            projPath = selfPath[:selfPath.find("source/taos-community")]
+        elif ("community" in selfPath):
             projPath = selfPath[:selfPath.find("community")]
         else:
             projPath = selfPath[:selfPath.find("tests")]
@@ -1850,7 +1853,7 @@ class TDCom:
         else:
             self.query_result_file = f"./temp_{test_case}.result"
             cfgPath = self.getClientCfgPath()
-            os.system(f"taos -c {cfgPath} -f {inputfile} | grep -v 'Query OK'|grep -v 'Copyright'| grep -v 'Welcome to the TDengine Command' > {self.query_result_file}  ")
+            os.system(f"taos -c {cfgPath} -f {inputfile} | grep -v 'Query OK'|grep -v 'Copyright'| grep -v 'Welcome to the TDengine TSDB Command' > {self.query_result_file}  ")
             return self.query_result_file
 
     def compare_result_files(self, file1, file2):

@@ -1,13 +1,6 @@
 ---
 title: Seeq
-slug: /third-party-tools/analytics/seeq
 ---
-
-import Image from '@theme/IdealImage';
-import imgStep01 from '../../assets/seeq-01.png';
-import imgStep02 from '../../assets/seeq-02.png';
-import imgStep03 from '../../assets/seeq-03.png';
-import imgStep04 from '../../assets/seeq-04.png';
 
 Seeq is advanced analytics software for the manufacturing and Industrial Internet of Things (IIOT). Seeq supports innovative new features using machine learning in process manufacturing organizations. These features enable organizations to deploy their own or third-party machine learning algorithms to advanced analytics applications used by frontline process engineers and subject matter experts, thus extending the efforts of a single data scientist to many frontline staff.
 
@@ -16,7 +9,7 @@ Through the `TDengine Java connector`, Seeq can easily support querying time-ser
 ## Prerequisites
 
 - TDengine 3.1.0.3 and above version is installed and running normally (both Enterprise and Community versions are available).
-- taosAdapter is running normally, refer to [taosAdapter Reference](../../../tdengine-reference/components/taosadapter/).
+- taosAdapter is running normally, refer to [taosAdapter Reference](../../14-reference/01-components/03-taosadapter.md).
 - Seeq has been installed. Download the relevant software from [Seeq's official website](https://www.seeq.com/customer-download), such as `Seeq Server` and `Seeq Data Lab`, etc. `Seeq Data Lab` needs to be installed on a different server from `Seeq Server` and interconnected through configuration. For detailed installation and configuration instructions, refer to the [Seeq Knowledge Base](https://support.seeq.com/kb/latest/cloud/).
 - Install the JDBC driver. Download the `TDengine JDBC connector` file `taos-jdbcdriver-3.2.5-dist.jar` or a higher version from `maven.org`.
 
@@ -55,9 +48,7 @@ CREATE STABLE meters (ts TIMESTAMP, num INT, temperature FLOAT, goods INT) TAGS 
 CREATE TABLE goods (ts1 TIMESTAMP, ts2 TIMESTAMP, goods FLOAT);
 ```
 
-<figure>
-<Image img={imgStep01} alt=""/>
-</figure>
+![Create tables in TDengine](../../assets/seeq-01.png)
 
 **Step 2**, Construct data in TDengine.
 
@@ -68,7 +59,7 @@ taos -s "insert into power.goods select _wstart, _wstart + 10d, avg(goods) from 
 
 The source code is hosted on [GitHub Repository](https://github.com/sangshuduo/td-forecasting).
 
-**第 3 步**，Log in using a Seeq administrator role account and create a new data source.
+**Step 3**, Log in using a Seeq administrator role account and create a new data source.
 
 - Power
 
@@ -121,8 +112,8 @@ The source code is hosted on [GitHub Repository](https://github.com/sangshuduo/t
     "UseSSL": false,
     "JdbcProperties": null,
     "GenericDatabaseConfig": {
-        "DatabaseJdbcUrl": "jdbc:TAOS-RS://127.0.0.1:6041/power?user=root&password=taosdata",
-        "SqlDriverClassName": "com.taosdata.jdbc.rs.RestfulDriver",
+        "DatabaseJdbcUrl": "jdbc:TAOS-WS://127.0.0.1:6041/power?user=root&password=taosdata",
+        "SqlDriverClassName": "com.taosdata.jdbc.ws.WebSocketDriver",
         "ResolutionInNanoseconds": 1000,
         "ZonedColumnTypes": []
     }
@@ -181,8 +172,8 @@ The source code is hosted on [GitHub Repository](https://github.com/sangshuduo/t
     "UseSSL": false,
     "JdbcProperties": null,
     "GenericDatabaseConfig": {
-        "DatabaseJdbcUrl": "jdbc:TAOS-RS://127.0.0.1:6041/power?user=root&password=taosdata",
-        "SqlDriverClassName": "com.taosdata.jdbc.rs.RestfulDriver",
+        "DatabaseJdbcUrl": "jdbc:TAOS-WS://127.0.0.1:6041/power?user=root&password=taosdata",
+        "SqlDriverClassName": "com.taosdata.jdbc.ws.WebSocketDriver",
         "ResolutionInNanoseconds": 1000,
         "ZonedColumnTypes": []
     }
@@ -240,8 +231,8 @@ The source code is hosted on [GitHub Repository](https://github.com/sangshuduo/t
     "UseSSL": false,
     "JdbcProperties": null,
     "GenericDatabaseConfig": {
-        "DatabaseJdbcUrl": "jdbc:TAOS-RS://127.0.0.1:6041/power?user=root&password=taosdata",
-        "SqlDriverClassName": "com.taosdata.jdbc.rs.RestfulDriver",
+        "DatabaseJdbcUrl": "jdbc:TAOS-WS://127.0.0.1:6041/power?user=root&password=taosdata",
+        "SqlDriverClassName": "com.taosdata.jdbc.ws.WebSocketDriver",
         "ResolutionInNanoseconds": 1000,
         "ZonedColumnTypes": []
     }
@@ -252,15 +243,13 @@ The source code is hosted on [GitHub Repository](https://github.com/sangshuduo/t
 
 Log in to the Seeq service page and create a new Seeq Workbench. By selecting data sources from search results and choosing different tools as needed, you can display data or make predictions. For detailed usage methods, refer to the [official knowledge base](https://support.seeq.com/space/KB/146440193/Seeq+Workbench).
 
-<figure>
-<Image img={imgStep02} alt=""/>
-</figure>
+![Create Seeq Workbench](../../assets/seeq-02.png)
 
 ### Further Data Analysis with Seeq Data Lab Server
 
 Log in to the Seeq service page and create a new Seeq Data Lab, where you can use Python programming or other machine learning tools for more complex data mining functions.
 
-```Python
+```python
 from seeq import spy
 spy.options.compatibility = 189
 import pandas as pd
@@ -323,9 +312,7 @@ plt.show()
 
 Program output results:
 
-<figure>
-<Image img={imgStep03} alt=""/>
-</figure>
+![Output results](../../assets/seeq-03.png)
 
 ### Solution Summary
 

@@ -40,6 +40,26 @@ TEST_F(ParserInitialDTest, deleteSemanticCheck) {
   run("DELETE FROM t1 WHERE c1 > 10", TSDB_CODE_PAR_INVALID_DELETE_WHERE, PARSER_STAGE_TRANSLATE);
 }
 
+TEST_F(ParserInitialDTest, deleteSecureDelete) {
+  useDb("root", "test");
+
+  int8_t expectSecureDelete = 0;
+  setCheckDdlFunc([&](const SQuery* pQuery, ParserStage stage) {
+    ASSERT_EQ(nodeType(pQuery->pRoot), QUERY_NODE_DELETE_STMT);
+    SDeleteStmt* pStmt = (SDeleteStmt*)pQuery->pRoot;
+    ASSERT_EQ(pStmt->secureDelete, expectSecureDelete);
+  });
+
+  expectSecureDelete = 0;
+  run("DELETE FROM t1");
+
+  expectSecureDelete = 1;
+  run("DELETE FROM t1 SECURE_DELETE");
+
+  expectSecureDelete = 1;
+  run("DELETE FROM t1 WHERE ts > now - 2d and ts < now - 1d SECURE_DELETE");
+}
+
 // DESC table_name
 TEST_F(ParserInitialDTest, describe) {
   useDb("root", "test");
@@ -226,37 +246,6 @@ TEST_F(ParserInitialDTest, dropSTable) {
   useDb("root", "test");
 
   run("DROP STABLE st1");
-}
-
-TEST_F(ParserInitialDTest, dropStream) {
-  useDb("root", "test");
-
-  SMDropStreamReq expect = {0};
-
-  auto clearDropStreamReq = [&]() { memset(&expect, 0, sizeof(SMDropStreamReq)); };
-
-  auto setDropStreamReq = [&](const char* pStream, int8_t igNotExists = 0) {
-    sprintf(expect.name, "0.%s", pStream);
-    expect.igNotExists = igNotExists;
-  };
-
-  setCheckDdlFunc([&](const SQuery* pQuery, ParserStage stage) {
-    ASSERT_EQ(nodeType(pQuery->pRoot), QUERY_NODE_DROP_STREAM_STMT);
-    SMDropStreamReq req = {0};
-    ASSERT_TRUE(TSDB_CODE_SUCCESS == tDeserializeSMDropStreamReq(pQuery->pCmdMsg->pMsg, pQuery->pCmdMsg->msgLen, &req));
-
-    ASSERT_EQ(std::string(req.name), std::string(expect.name));
-    ASSERT_EQ(req.igNotExists, expect.igNotExists);
-    tFreeMDropStreamReq(&req);
-  });
-
-  setDropStreamReq("s1");
-  run("DROP STREAM s1");
-  clearDropStreamReq();
-
-  setDropStreamReq("s2", 1);
-  run("DROP STREAM IF EXISTS s2");
-  clearDropStreamReq();
 }
 
 TEST_F(ParserInitialDTest, dropTable) {

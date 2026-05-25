@@ -34,6 +34,7 @@ extern "C" {
 #include "tmsgtype.h"
 #include "trpc.h"
 
+// #include "clientSession.h"
 #include "tconfig.h"
 
 #define ERROR_MSG_BUF_DEFAULT_SIZE 512
@@ -63,6 +64,24 @@ enum {
 #define TD_RES_TMQ_BATCH_META(res) (*(int8_t*)(res) == RES_TYPE__TMQ_BATCH_META)
 
 #define TSC_MAX_SUBPLAN_CAPACITY_NUM 1000
+
+// Client request phase tracking macros
+#define CLIENT_SET_REQUEST_PHASE(_req, _phase)                      \
+  do {                                                              \
+    atomic_store_32(&(_req)->execPhase, (_phase));                  \
+    atomic_store_64(&(_req)->phaseStartTime, taosGetTimestampMs()); \
+  } while (0)
+
+#define CLIENT_UPDATE_REQUEST_PHASE_IF_CHANGED(_req, _newPhase)       \
+  do {                                                                \
+    if (atomic_load_32(&(_req)->execPhase) != (_newPhase)) {          \
+      atomic_store_32(&(_req)->execPhase, (_newPhase));               \
+      atomic_store_64(&(_req)->phaseStartTime, taosGetTimestampMs()); \
+    }                                                                 \
+  } while (0)
+
+#define CLIENT_GET_REQUEST_PHASE(_req)            atomic_load_32(&(_req)->execPhase)
+#define CLIENT_GET_REQUEST_PHASE_START_TIME(_req) atomic_load_64(&(_req)->phaseStartTime)
 
 typedef struct SAppInstInfo SAppInstInfo;
 
@@ -115,7 +134,18 @@ typedef struct SQueryExecMetric {
 typedef struct {
   SMonitorParas monitorParas;
   int8_t        enableAuditDelete;
+  int8_t        enableAuditSelect;
+  int8_t        enableAuditInsert;
+  int8_t        auditLevel;
   int8_t        enableStrongPass;
+  union {
+    uint32_t flags;
+    struct {
+      uint32_t sodInitial : 1;
+      uint32_t macActive : 1;  // 1 = MAC explicitly activated cluster-wide (from SConnectRsp or hb resp)
+      uint32_t reserved : 30;
+    };
+  };
 } SAppInstServerCFG;
 struct SAppInstInfo {
   int64_t            numOfConns;
@@ -155,18 +185,33 @@ typedef struct {
   int64_t            ver;
   void*              param;
   __taos_notify_fn_t fp;
+} STokenNotifyInfo;
+
+typedef struct {
+  int64_t            ver;
+  void*              param;
+  __taos_notify_fn_t fp;
 } SWhiteListInfo;
 
 typedef struct {
   timezone_t    timezone;
   void         *charsetCxt;
   char          userApp[TSDB_APP_NAME_LEN];
+  char          cInfo[CONNECTOR_INFO_LEN];
   uint32_t      userIp;
+  SIpRange      userDualIp;  // user ip range
 }SOptionInfo;
+
+typedef struct {
+  int64_t startTime;
+  int64_t lastAccessTime;
+} SConnAccessInfo;
 
 typedef struct STscObj {
   char           user[TSDB_USER_LEN];
+  char           tokenName[TSDB_TOKEN_NAME_LEN];
   char           pass[TSDB_PASSWORD_LEN];
+  char           token[TSDB_TOKEN_LEN];
   char           db[TSDB_DB_FNAME_LEN];
   char           sVer[TSDB_VERSION_LEN];
   char           sDetailVer[128];
@@ -174,9 +219,20 @@ typedef struct STscObj {
   int8_t         connType;
   int8_t         dropped;
   int8_t         biMode;
+  union {
+    uint32_t flags;
+    struct {
+      uint32_t minSecLevel : 3;
+      uint32_t maxSecLevel : 3;
+      uint32_t enable : 1;
+      uint32_t reserved : 25;
+    };
+  };
   int32_t        acctId;
   uint32_t       connId;
   int32_t        appHbMgrIdx;
+  int32_t        tokenExpireTime;
+  int64_t        userId;
   int64_t        id;         // ref ID returned by taosAddRef
   TdThreadMutex  mutex;      // used to protect the operation on db
   int32_t        numOfReqs;  // number of sqlObj bound to this connection
@@ -184,9 +240,14 @@ typedef struct STscObj {
   SAppInstInfo*  pAppInfo;
   SHashObj*      pRequests;
   SPassInfo      passInfo;
-  SWhiteListInfo whiteListInfo;
+  SWhiteListInfo whiteListInfo;          // ip white list info
+  SWhiteListInfo dateTimeWhiteListInfo;  // date time white list info
   STscNotifyInfo userDroppedInfo;
+  STokenNotifyInfo tokenNotifyInfo;
   SOptionInfo    optionInfo;
+
+  SConnAccessInfo sessInfo;
+  void*           pSessMetric;
 } STscObj;
 
 typedef struct STscDbg {
@@ -243,7 +304,6 @@ typedef struct {
   char           topic[TSDB_TOPIC_FNAME_LEN];
   char           db[TSDB_DB_FNAME_LEN];
   int32_t        vgId;
-  SSchemaWrapper schema;
   int32_t        resIter;
   SReqResultInfo resInfo;
   union{
@@ -290,7 +350,7 @@ typedef struct SRequestObj {
   bool                 inRetry;
   bool                 isSubReq;
   bool                 inCallback;
-  bool                 isStmtBind;  // is statement bind parameter
+  uint8_t              stmtBindVersion;  // 0 for not stmt; 1 for stmt1; 2 for stmt2
   bool                 isQuery;
   uint32_t             prevCode;  // previous error code: todo refactor, add update flag for catalog
   uint32_t             retry;
@@ -301,7 +361,9 @@ typedef struct SRequestObj {
   SMetaData            parseMeta;
   char*                effectiveUser;
   int8_t               source;
-  bool                 streamRunHistory;
+  int32_t              execPhase;       // EQueryExecPhase
+  int64_t              phaseStartTime;  // when current phase started, ms
+  int8_t               secureDelete;
 } SRequestObj;
 
 typedef struct SSyncQueryParam {
@@ -342,6 +404,7 @@ static FORCE_INLINE SReqResultInfo* tmqGetCurResInfo(TAOS_RES* res) {
 }
 
 int32_t                             tmqGetNextResInfo(TAOS_RES* res, bool convertUcs4, SReqResultInfo** pResInfo);
+
 static FORCE_INLINE SReqResultInfo* tscGetCurResInfo(TAOS_RES* res) {
   if (TD_RES_QUERY(res)) return &(((SRequestObj*)res)->body.resInfo);
   return tmqGetCurResInfo(res);
@@ -349,8 +412,7 @@ static FORCE_INLINE SReqResultInfo* tscGetCurResInfo(TAOS_RES* res) {
 
 extern SAppInfo appInfo;
 extern int32_t  clientReqRefPool;
-extern int32_t  clientConnRefPool;
-extern int32_t  timestampDeltaLimit;
+extern int32_t   clientConnRefPool;
 extern int64_t  lastClusterId;
 extern SHashObj* pTimezoneMap;
 
@@ -393,12 +455,17 @@ typedef struct AsyncArg {
 bool persistConnForSpecificMsg(void* parenct, tmsg_t msgType);
 void processMsgFromServer(void* parent, SRpcMsg* pMsg, SEpSet* pEpSet);
 
-int32_t taos_connect_internal(const char* ip, const char* user, const char* pass, const char* auth, const char* db,
+int32_t taos_connect_internal(const char* ip, const char* user, const char* pass, const char* totp, const char* db,
+                              uint16_t port, int connType, STscObj** pObj);
+                              
+int32_t taos_connect_by_auth(const char* ip, const char* user, const char* auth, const char* totp, const char* db, 
                               uint16_t port, int connType, STscObj** pObj);
 
 int32_t parseSql(SRequestObj* pRequest, bool topicQuery, SQuery** pQuery, SStmtCallback* pStmtCb);
 
 int32_t getPlan(SRequestObj* pRequest, SQuery* pQuery, SQueryPlan** pPlan, SArray* pNodeList);
+int32_t sqlSecurityCheckStringLevel(SRequestObj* pRequest, const char* sql, int32_t sqlLen);
+int32_t sqlSecurityCheckASTLevel(SRequestObj* pRequest, SQuery* pQuery);
 
 int32_t buildRequest(uint64_t connId, const char* sql, int sqlLen, void* param, bool validateSql,
                      SRequestObj** pRequest, int64_t reqid);
@@ -420,7 +487,7 @@ void    stopAllRequests(SHashObj* pRequests);
 // SAppInstInfo* getAppInstInfo(const char* clusterKey);
 
 // conn level
-int32_t hbRegisterConn(SAppHbMgr* pAppHbMgr, int64_t tscRefId, int64_t clusterId, int8_t connType);
+int32_t hbRegisterConn(SAppHbMgr* pAppHbMgr, int64_t tscRefId, const char* user, const char* tokenName, int64_t clusterId, int8_t connType);
 void    hbDeregisterConn(STscObj* pTscObj, SClientHbKey connKey);
 
 typedef struct SSqlCallbackWrapper {
@@ -445,6 +512,7 @@ void    continueInsertFromCsv(SSqlCallbackWrapper* pWrapper, SRequestObj* pReque
 void    destorySqlCallbackWrapper(SSqlCallbackWrapper* pWrapper);
 void    handleQueryAnslyseRes(SSqlCallbackWrapper* pWrapper, SMetaData* pResultMeta, int32_t code);
 void    restartAsyncQuery(SRequestObj* pRequest, int32_t code);
+void    destroyCtxInRequest(SRequestObj* pRequest);
 int32_t buildPreviousRequest(SRequestObj* pRequest, const char* sql, SRequestObj** pNewRequest);
 int32_t prepareAndParseSqlSyntax(SSqlCallbackWrapper** ppWrapper, SRequestObj* pRequest, bool updateMetaForce);
 void    returnToUser(SRequestObj* pRequest);
@@ -452,6 +520,7 @@ void    stopAllQueries(SRequestObj* pRequest);
 void    doRequestCallback(SRequestObj* pRequest, int32_t code);
 void    freeQueryParam(SSyncQueryParam* param);
 
+void    updateConnAccessInfo(SConnAccessInfo* pInfo);
 int32_t tzInit();
 void    tzCleanup();
 

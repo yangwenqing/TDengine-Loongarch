@@ -33,7 +33,7 @@ dumpName2="${clientName2}dump"
 demoName2="${clientName2}demo"
 uninstallScript2="rm${clientName2}"
 inspect_name="${clientName2}inspect"
-
+taosgen_name="${clientName2}taosgen"
 
 if [ "$osType" != "Darwin" ]; then
     script_dir=$(dirname $(readlink -f "$0"))
@@ -84,10 +84,9 @@ fi
 update_flag=0
 
 function kill_client() {
-  pid=$(ps -ef | grep "${clientName}" | grep -v "grep" | awk '{print $2}')
-  if [ -n "$pid" ]; then
-    ${csudo}kill -9 $pid   || :
-  fi
+  pgrep -x "${clientName}" | while read p; do
+    ${csudo}kill -9 "$p" 2>/dev/null || :
+  done || true
 }
 
 function install_main_path() {
@@ -97,7 +96,7 @@ function install_main_path() {
   ${csudo}mkdir -p ${install_main_dir}/cfg
   ${csudo}mkdir -p ${install_main_dir}/bin
   ${csudo}mkdir -p ${install_main_dir}/driver
-  if [ "$productName2" == "TDengine" ]; then
+  if [[ "$productName2" == "TDengine"* ]]; then
     ${csudo}mkdir -p ${install_main_dir}/examples
   fi
   ${csudo}mkdir -p ${install_main_dir}/include
@@ -112,6 +111,7 @@ function install_bin() {
   if [ "$osType" != "Darwin" ]; then
       ${csudo}rm -f ${bin_link_dir}/taosdemo || :
       ${csudo}rm -f ${bin_link_dir}/${inspect_name} || :
+      ${csudo}rm -f ${bin_link_dir}/${taosgen_name} || :    
   fi
   ${csudo}rm -f ${bin_link_dir}/${uninstallScript} || :
   ${csudo}rm -f ${bin_link_dir}/set_core || :
@@ -125,6 +125,7 @@ function install_bin() {
   if [ "$osType" != "Darwin" ]; then
       [ -x ${install_main_dir}/bin/${demoName2} ] && ${csudo}ln -s ${install_main_dir}/bin/${demoName2} ${bin_link_dir}/${demoName2}  || :
       [ -x ${install_main_dir}/bin/${inspect_name} ] && ${csudo}ln -s ${install_main_dir}/bin/${inspect_name} ${bin_link_dir}/${inspect_name} || :
+      [ -x ${install_main_dir}/bin/${taosgen_name} ] && ${csudo}ln -s ${install_main_dir}/bin/${taosgen_name} ${bin_link_dir}/${taosgen_name} || :
   fi
   [ -x ${install_main_dir}/bin/remove_client.sh ] && ${csudo}ln -s ${install_main_dir}/bin/remove_client.sh ${bin_link_dir}/${uninstallScript} || :
   [ -x ${install_main_dir}/bin/set_core.sh ] && ${csudo}ln -s ${install_main_dir}/bin/set_core.sh ${bin_link_dir}/set_core || :  
@@ -160,7 +161,10 @@ function install_lib() {
         ${csudo}ln -s ${install_main_dir}/driver/libtaosnative.* ${lib_link_dir}/libtaosnative.so.1
         ${csudo}ln -s ${lib_link_dir}/libtaosnative.so.1 ${lib_link_dir}/libtaosnative.so
 
-        [ -f ${install_main_dir}/driver/libtaosws.so ] && ${csudo}ln -sf ${install_main_dir}/driver/libtaosws.so ${lib_link_dir}/libtaosws.so ||:
+        # Check if libtaosws.so.* files exist using ls instead of -f with glob
+        if ls ${install_main_dir}/driver/libtaosws.so.* > /dev/null 2>&1; then
+            ${csudo}ln -sf ${install_main_dir}/driver/libtaosws.so.* ${lib_link_dir}/libtaosws.so
+        fi
 
         if [ -d "${lib64_link_dir}" ]; then
             ${csudo}ln -s ${install_main_dir}/driver/libtaos.* ${lib64_link_dir}/libtaos.so.1       || :
@@ -168,7 +172,10 @@ function install_lib() {
             ${csudo}ln -s ${install_main_dir}/driver/libtaosnative.* ${lib64_link_dir}/libtaosnative.so.1       || :
             ${csudo}ln -s ${lib64_link_dir}/libtaosnative.so.1 ${lib64_link_dir}/libtaosnative.so               || :
 
-            [ -f ${install_main_dir}/driver/libtaosws.so ] && ${csudo}ln -sf ${install_main_dir}/driver/libtaosws.so ${lib64_link_dir}/libtaosws.so       || :
+            # Check if libtaosws.so.* files exist using ls instead of -f with glob
+            if ls ${install_main_dir}/driver/libtaosws.so.* > /dev/null 2>&1; then
+                ${csudo}ln -sf ${install_main_dir}/driver/libtaosws.so.* ${lib64_link_dir}/libtaosws.so
+            fi
         fi
     else
         ${csudo}ln -s ${install_main_dir}/driver/libtaos.* ${lib_link_dir}/libtaos.1.dylib
@@ -176,7 +183,10 @@ function install_lib() {
         ${csudo}ln -s ${install_main_dir}/driver/libtaosnative.* ${lib_link_dir}/libtaosnative.1.dylib
         ${csudo}ln -s ${lib_link_dir}/libtaosnative.1.dylib ${lib_link_dir}/libtaosnative.dylib
 
-        [ -f ${install_main_dir}/driver/libtaosws.dylib ] && ${csudo}ln -sf ${install_main_dir}/driver/libtaosws.dylib ${lib_link_dir}/libtaosws.dylib ||:
+        # Check if libtaosws.dylib.* files exist using ls instead of -f with glob
+        if ls ${install_main_dir}/driver/libtaosws.dylib.* > /dev/null 2>&1; then
+            ${csudo}ln -sf ${install_main_dir}/driver/libtaosws.dylib.* ${lib_link_dir}/libtaosws.dylib
+        fi
     fi
 
     if [ "$osType" != "Darwin" ]; then

@@ -18,9 +18,11 @@
 #include "decimal.h"
 #include "function.h"
 #include "functionResInfoInt.h"
+#include "geosWrapper.h"
 #include "query.h"
 #include "querynodes.h"
 #include "tanalytics.h"
+#include "tarray.h"
 #include "tcompare.h"
 #include "tdatablock.h"
 #include "tdigest.h"
@@ -28,6 +30,8 @@
 #include "tglobal.h"
 #include "thistogram.h"
 #include "tpercentile.h"
+#include "ttime.h"
+#include "ttypes.h"
 
 bool ignoreNegative(int8_t ignoreOption) { return (ignoreOption & 0x1) == 0x1; }
 bool ignoreNull(int8_t ignoreOption) { return (ignoreOption & 0x2) == 0x2; }
@@ -94,16 +98,16 @@ typedef enum {
     }                                                                    \
   } while (0)
 
-#define LIST_ADD_N(_res, _col, _start, _rows, _t, numOfElem)             \
-  do {                                                                   \
-    _t* d = (_t*)(_col->pData);                                          \
-    for (int32_t i = (_start); i < (_rows) + (_start); ++i) {            \
-      if (((_col)->hasNull) && colDataIsNull_f((_col)->nullbitmap, i)) { \
-        continue;                                                        \
-      };                                                                 \
-      (_res) += (d)[i];                                                  \
-      (numOfElem)++;                                                     \
-    }                                                                    \
+#define LIST_ADD_N(_res, _col, _start, _rows, _t, numOfElem)  \
+  do {                                                        \
+    _t* d = (_t*)(_col->pData);                               \
+    for (int32_t i = (_start); i < (_rows) + (_start); ++i) { \
+      if (((_col)->hasNull) && colDataIsNull_f(_col, i)) {    \
+        continue;                                             \
+      };                                                      \
+      (_res) += (d)[i];                                       \
+      (numOfElem)++;                                          \
+    }                                                         \
   } while (0)
 
 #define LIST_ADD_DECIMAL_N(_res, _col, _start, _rows, _t, numOfElem)                                  \
@@ -111,7 +115,7 @@ typedef enum {
     _t*                d = (_t*)(_col->pData);                                                        \
     const SDecimalOps* pOps = getDecimalOps(TSDB_DATA_TYPE_DECIMAL);                                  \
     for (int32_t i = (_start); i < (_rows) + (_start); ++i) {                                         \
-      if (((_col)->hasNull) && colDataIsNull_f((_col)->nullbitmap, i)) {                              \
+      if (((_col)->hasNull) && colDataIsNull_f(_col, i)) {                                            \
         continue;                                                                                     \
       };                                                                                              \
       overflow = overflow || decimal128AddCheckOverflow((Decimal*)_res, d + i, DECIMAL_WORD_NUM(_t)); \
@@ -121,37 +125,23 @@ typedef enum {
     }                                                                                                 \
   } while (0)
 
-#define LIST_SUB_N(_res, _col, _start, _rows, _t, numOfElem)             \
-  do {                                                                   \
-    _t* d = (_t*)(_col->pData);                                          \
-    for (int32_t i = (_start); i < (_rows) + (_start); ++i) {            \
-      if (((_col)->hasNull) && colDataIsNull_f((_col)->nullbitmap, i)) { \
-        continue;                                                        \
-      };                                                                 \
-      (_res) -= (d)[i];                                                  \
-      (numOfElem)++;                                                     \
-    }                                                                    \
+#define LIST_SUB_N(_res, _col, _start, _rows, _t, numOfElem)  \
+  do {                                                        \
+    _t* d = (_t*)(_col->pData);                               \
+    for (int32_t i = (_start); i < (_rows) + (_start); ++i) { \
+      if (((_col)->hasNull) && colDataIsNull_f(_col, i)) {    \
+        continue;                                             \
+      };                                                      \
+      (_res) -= (d)[i];                                       \
+      (numOfElem)++;                                          \
+    }                                                         \
   } while (0)
-
-//#define LIST_AVG_N(sumT, T)                                               \
-//  do {                                                                    \
-//    T* plist = (T*)pCol->pData;                                           \
-//    for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) { \
-//      if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {        \
-//        continue;                                                         \
-//      }                                                                   \
-//                                                                          \
-//      numOfElem += 1;                                                     \
-//      pAvgRes->count -= 1;                                                \
-//      sumT -= plist[i];                                                   \
-//    }                                                                     \
-//  } while (0)
 
 #define LIST_STDDEV_SUB_N(sumT, T)                                 \
   do {                                                             \
     T* plist = (T*)pCol->pData;                                    \
     for (int32_t i = start; i < numOfRows + start; ++i) {          \
-      if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) { \
+      if (pCol->hasNull && colDataIsNull_f(pCol, i)) {             \
         continue;                                                  \
       }                                                            \
       numOfElem += 1;                                              \
@@ -252,7 +242,7 @@ int32_t funcInputGetNextRowDescPk(SFuncInputRowIter* pIter, SFuncInputRow* pRow,
         return code;
       }
 
-      pIter->prevIsDataNull = colDataIsNull_f(pIter->pDataCol->nullbitmap, pIter->inputEndIndex);
+      pIter->prevIsDataNull = colDataIsNull_s(pIter->pDataCol, pIter->inputEndIndex);
 
       pIter->pPrevData = taosMemoryMalloc(pIter->pDataCol->info.bytes);
       if (NULL == pIter->pPrevData) {
@@ -288,7 +278,7 @@ int32_t funcInputGetNextRowDescPk(SFuncInputRowIter* pIter, SFuncInputRow* pRow,
         pRow->rowIndex = 0;
       } else {
         pRow->ts = pIter->tsList[idx - 1];
-        pRow->isDataNull = colDataIsNull_f(pIter->pDataCol->nullbitmap, idx - 1);
+        pRow->isDataNull = colDataIsNull_s(pIter->pDataCol, idx - 1);
         pRow->pData = colDataGetData(pIter->pDataCol, idx - 1);
         pRow->pPk = colDataGetData(pIter->pPkCol, idx - 1);
         pRow->block = pIter->pSrcBlock;
@@ -307,7 +297,7 @@ int32_t funcInputGetNextRowDescPk(SFuncInputRowIter* pIter, SFuncInputRow* pRow,
         ++idx;
       }
       pRow->ts = pIter->tsList[idx];
-      pRow->isDataNull = colDataIsNull_f(pIter->pDataCol->nullbitmap, idx);
+      pRow->isDataNull = colDataIsNull_s(pIter->pDataCol, idx);
       pRow->pData = colDataGetData(pIter->pDataCol, idx);
       pRow->pPk = colDataGetData(pIter->pPkCol, idx);
       pRow->block = pIter->pSrcBlock;
@@ -318,7 +308,7 @@ int32_t funcInputGetNextRowDescPk(SFuncInputRowIter* pIter, SFuncInputRow* pRow,
     } else {
       pIter->hasPrev = true;
       pIter->prevBlockTsEnd = tsEnd;
-      pIter->prevIsDataNull = colDataIsNull_f(pIter->pDataCol->nullbitmap, pIter->inputEndIndex);
+      pIter->prevIsDataNull = colDataIsNull_s(pIter->pDataCol, pIter->inputEndIndex);
       pIter->pPrevData = taosMemoryMalloc(pIter->pDataCol->info.bytes);
       if (NULL == pIter->pPrevData) {
         qError("out of memory when function get input row.");
@@ -352,7 +342,7 @@ static void forwardToNextDiffTsRow(SFuncInputRowIter* pIter, int32_t rowIndex) {
 static void setInputRowInfo(SFuncInputRow* pRow, SFuncInputRowIter* pIter, int32_t rowIndex, bool setPk) {
   pRow->ts = pIter->tsList[rowIndex];
   pRow->ts = pIter->tsList[rowIndex];
-  pRow->isDataNull = colDataIsNull_f(pIter->pDataCol->nullbitmap, rowIndex);
+  pRow->isDataNull = colDataIsNull_s(pIter->pDataCol, rowIndex);
   pRow->pData = colDataGetData(pIter->pDataCol, rowIndex);
   pRow->pPk = setPk ? colDataGetData(pIter->pPkCol, rowIndex) : NULL;
   pRow->block = pIter->pSrcBlock;
@@ -408,11 +398,11 @@ bool funcInputGetNextRowNoPk(SFuncInputRowIter* pIter, SFuncInputRow* pRow) {
 int32_t funcInputGetNextRow(SqlFunctionCtx* pCtx, SFuncInputRow* pRow, bool* res) {
   SFuncInputRowIter* pIter = &pCtx->rowIter;
   if (pCtx->hasPrimaryKey) {
-    if (pCtx->order == TSDB_ORDER_ASC) {
-      *res = funcInputGetNextRowAscPk(pIter, pRow);
+    if (pCtx->order == TSDB_ORDER_DESC) {
+      return funcInputGetNextRowDescPk(pIter, pRow, res);
       return TSDB_CODE_SUCCESS;
     } else {
-      return funcInputGetNextRowDescPk(pIter, pRow, res);
+      *res = funcInputGetNextRowAscPk(pIter, pRow);
     }
   } else {
     *res = funcInputGetNextRowNoPk(pIter, pRow);
@@ -603,19 +593,6 @@ int32_t countFunction(SqlFunctionCtx* pCtx) {
   return TSDB_CODE_SUCCESS;
 }
 
-#ifdef BUILD_NO_CALL
-int32_t countInvertFunction(SqlFunctionCtx* pCtx) {
-  int64_t numOfElem = getNumOfElems(pCtx);
-
-  SResultRowEntryInfo* pResInfo = GET_RES_INFO(pCtx);
-  char*                buf = GET_ROWCELL_INTERBUF(pResInfo);
-  *((int64_t*)buf) -= numOfElem;
-
-  SET_VAL(pResInfo, *((int64_t*)buf), 1);
-  return TSDB_CODE_SUCCESS;
-}
-#endif
-
 int32_t combineFunction(SqlFunctionCtx* pDestCtx, SqlFunctionCtx* pSourceCtx) {
   SResultRowEntryInfo* pDResInfo = GET_RES_INFO(pDestCtx);
   char*                pDBuf = GET_ROWCELL_INTERBUF(pDResInfo);
@@ -721,66 +698,6 @@ _sum_over:
   SET_VAL(GET_RES_INFO(pCtx), numOfElem, 1);
   return TSDB_CODE_SUCCESS;
 }
-
-#ifdef BUILD_NO_CALL
-int32_t sumInvertFunction(SqlFunctionCtx* pCtx) {
-  int32_t numOfElem = 0;
-
-  // Only the pre-computing information loaded and actual data does not loaded
-  SInputColumnInfoData* pInput = &pCtx->input;
-  SColumnDataAgg*       pAgg = pInput->pColumnDataAgg[0];
-  int32_t               type = pInput->pData[0]->info.type;
-
-  SSumRes* pSumRes = GET_ROWCELL_INTERBUF(GET_RES_INFO(pCtx));
-
-  if (pInput->colDataSMAIsSet) {
-    numOfElem = pInput->numOfRows - pAgg->numOfNull;
-
-    if (IS_SIGNED_NUMERIC_TYPE(type)) {
-      pSumRes->isum -= pAgg->sum;
-    } else if (IS_UNSIGNED_NUMERIC_TYPE(type)) {
-      pSumRes->usum -= pAgg->sum;
-    } else if (IS_FLOAT_TYPE(type)) {
-      pSumRes->dsum -= GET_DOUBLE_VAL((const char*)&(pAgg->sum));
-    }
-  } else {  // computing based on the true data block
-    SColumnInfoData* pCol = pInput->pData[0];
-
-    int32_t start = pInput->startRowIndex;
-    int32_t numOfRows = pInput->numOfRows;
-
-    if (IS_SIGNED_NUMERIC_TYPE(type) || type == TSDB_DATA_TYPE_BOOL) {
-      if (type == TSDB_DATA_TYPE_TINYINT || type == TSDB_DATA_TYPE_BOOL) {
-        LIST_SUB_N(pSumRes->isum, pCol, start, numOfRows, int8_t, numOfElem);
-      } else if (type == TSDB_DATA_TYPE_SMALLINT) {
-        LIST_SUB_N(pSumRes->isum, pCol, start, numOfRows, int16_t, numOfElem);
-      } else if (type == TSDB_DATA_TYPE_INT) {
-        LIST_SUB_N(pSumRes->isum, pCol, start, numOfRows, int32_t, numOfElem);
-      } else if (type == TSDB_DATA_TYPE_BIGINT) {
-        LIST_SUB_N(pSumRes->isum, pCol, start, numOfRows, int64_t, numOfElem);
-      }
-    } else if (IS_UNSIGNED_NUMERIC_TYPE(type)) {
-      if (type == TSDB_DATA_TYPE_UTINYINT) {
-        LIST_SUB_N(pSumRes->usum, pCol, start, numOfRows, uint8_t, numOfElem);
-      } else if (type == TSDB_DATA_TYPE_USMALLINT) {
-        LIST_SUB_N(pSumRes->usum, pCol, start, numOfRows, uint16_t, numOfElem);
-      } else if (type == TSDB_DATA_TYPE_UINT) {
-        LIST_SUB_N(pSumRes->usum, pCol, start, numOfRows, uint32_t, numOfElem);
-      } else if (type == TSDB_DATA_TYPE_UBIGINT) {
-        LIST_SUB_N(pSumRes->usum, pCol, start, numOfRows, uint64_t, numOfElem);
-      }
-    } else if (type == TSDB_DATA_TYPE_DOUBLE) {
-      LIST_SUB_N(pSumRes->dsum, pCol, start, numOfRows, double, numOfElem);
-    } else if (type == TSDB_DATA_TYPE_FLOAT) {
-      LIST_SUB_N(pSumRes->dsum, pCol, start, numOfRows, float, numOfElem);
-    }
-  }
-
-  // data in the check operation are all null, not output
-  SET_VAL(GET_RES_INFO(pCtx), numOfElem, 1);
-  return TSDB_CODE_SUCCESS;
-}
-#endif
 
 int32_t sumCombine(SqlFunctionCtx* pDestCtx, SqlFunctionCtx* pSourceCtx) {
   SResultRowEntryInfo* pDResInfo = GET_RES_INFO(pDestCtx);
@@ -911,6 +828,7 @@ int32_t minmaxFunctionFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
     switch (pCol->info.type) {
       case TSDB_DATA_TYPE_UBIGINT:
       case TSDB_DATA_TYPE_BIGINT:
+      case TSDB_DATA_TYPE_TIMESTAMP:
         ((int64_t*)pCol->pData)[currentRow] = pRes->v;
         break;
       case TSDB_DATA_TYPE_UINT:
@@ -1084,6 +1002,7 @@ int32_t minMaxCombine(SqlFunctionCtx* pDestCtx, SqlFunctionCtx* pSourceCtx, int3
   switch (type) {
     case TSDB_DATA_TYPE_UBIGINT:
     case TSDB_DATA_TYPE_BIGINT:
+    case TSDB_DATA_TYPE_TIMESTAMP:
       if (pSBuf->assign && (COMPARE_MINMAX_DATA(int64_t) || !pDBuf->assign)) {
         pDBuf->v = pSBuf->v;
         replaceTupleData(&pDBuf->tuplePos, &pSBuf->tuplePos);
@@ -1126,7 +1045,8 @@ int32_t minMaxCombine(SqlFunctionCtx* pDestCtx, SqlFunctionCtx* pSourceCtx, int3
     }
     case TSDB_DATA_TYPE_DECIMAL64: {
       const SDecimalOps* pOps = getDecimalOps(type);
-      if (pSBuf->assign && ((pOps->lt(&pDBuf->v, &pSBuf->v, DECIMAL_WORD_NUM(Decimal64)) ^ isMinFunc) || !pDBuf->assign)) {
+      if (pSBuf->assign &&
+          ((pOps->lt(&pDBuf->v, &pSBuf->v, DECIMAL_WORD_NUM(Decimal64)) ^ isMinFunc) || !pDBuf->assign)) {
         pDBuf->v = pSBuf->v;
         replaceTupleData(&pDBuf->tuplePos, &pSBuf->tuplePos);
         pDBuf->assign = true;
@@ -1134,7 +1054,8 @@ int32_t minMaxCombine(SqlFunctionCtx* pDestCtx, SqlFunctionCtx* pSourceCtx, int3
     } break;
     case TSDB_DATA_TYPE_DECIMAL: {
       const SDecimalOps* pOps = getDecimalOps(type);
-      if (pSBuf->assign && (pOps->lt(pDBuf->dec, pSBuf->dec, DECIMAL_WORD_NUM(Decimal)) ^ isMinFunc) || !pDBuf->assign) {
+      if (pSBuf->assign && (pOps->lt(pDBuf->dec, pSBuf->dec, DECIMAL_WORD_NUM(Decimal)) ^ isMinFunc) ||
+          !pDBuf->assign) {
         memcpy(pDBuf->dec, pSBuf->dec, DECIMAL128_BYTES);
         replaceTupleData(&pDBuf->tuplePos, &pSBuf->tuplePos);
         pDBuf->assign = true;
@@ -1205,14 +1126,21 @@ int32_t stdFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_TINYINT: {
       int8_t* plist = (int8_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + start; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
         numOfElem += 1;
         pStdRes->count += 1;
-        pStdRes->isum += plist[i];
-        pStdRes->quadraticISum += plist[i] * plist[i];
+        double nr = (double)plist[i];
+        if (pStdRes->count == 1) {
+          pStdRes->dsum = nr;
+        } else {
+          double          s_kminusone = pStdRes->dsum;
+          volatile double diff = nr - s_kminusone;
+          pStdRes->dsum = s_kminusone + diff / (double)pStdRes->count;
+          pStdRes->quadraticDSum += diff * (nr - pStdRes->dsum);
+        }
       }
 
       break;
@@ -1221,14 +1149,21 @@ int32_t stdFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_SMALLINT: {
       int16_t* plist = (int16_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
         numOfElem += 1;
         pStdRes->count += 1;
-        pStdRes->isum += plist[i];
-        pStdRes->quadraticISum += plist[i] * plist[i];
+        double nr = (double)plist[i];
+        if (pStdRes->count == 1) {
+          pStdRes->dsum = nr;
+        } else {
+          double          s_kminusone = pStdRes->dsum;
+          volatile double diff = nr - s_kminusone;
+          pStdRes->dsum = s_kminusone + diff / (double)pStdRes->count;
+          pStdRes->quadraticDSum += diff * (nr - pStdRes->dsum);
+        }
       }
       break;
     }
@@ -1236,14 +1171,21 @@ int32_t stdFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_INT: {
       int32_t* plist = (int32_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
         numOfElem += 1;
         pStdRes->count += 1;
-        pStdRes->isum += plist[i];
-        pStdRes->quadraticISum += plist[i] * plist[i];
+        double nr = (double)plist[i];
+        if (pStdRes->count == 1) {
+          pStdRes->dsum = nr;
+        } else {
+          double          s_kminusone = pStdRes->dsum;
+          volatile double diff = nr - s_kminusone;
+          pStdRes->dsum = s_kminusone + diff / (double)pStdRes->count;
+          pStdRes->quadraticDSum += diff * (nr - pStdRes->dsum);
+        }
       }
 
       break;
@@ -1252,14 +1194,21 @@ int32_t stdFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_BIGINT: {
       int64_t* plist = (int64_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
         numOfElem += 1;
         pStdRes->count += 1;
-        pStdRes->isum += plist[i];
-        pStdRes->quadraticISum += plist[i] * plist[i];
+        double nr = (double)plist[i];
+        if (pStdRes->count == 1) {
+          pStdRes->dsum = nr;
+        } else {
+          double          s_kminusone = pStdRes->dsum;
+          volatile double diff = nr - s_kminusone;
+          pStdRes->dsum = s_kminusone + diff / (double)pStdRes->count;
+          pStdRes->quadraticDSum += diff * (nr - pStdRes->dsum);
+        }
       }
       break;
     }
@@ -1267,14 +1216,21 @@ int32_t stdFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_UTINYINT: {
       uint8_t* plist = (uint8_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + start; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
         numOfElem += 1;
         pStdRes->count += 1;
-        pStdRes->usum += plist[i];
-        pStdRes->quadraticUSum += plist[i] * plist[i];
+        double nr = (double)plist[i];
+        if (pStdRes->count == 1) {
+          pStdRes->dsum = nr;
+        } else {
+          double          s_kminusone = pStdRes->dsum;
+          volatile double diff = nr - s_kminusone;
+          pStdRes->dsum = s_kminusone + diff / (double)pStdRes->count;
+          pStdRes->quadraticDSum += diff * (nr - pStdRes->dsum);
+        }
       }
 
       break;
@@ -1283,14 +1239,21 @@ int32_t stdFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_USMALLINT: {
       uint16_t* plist = (uint16_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
         numOfElem += 1;
         pStdRes->count += 1;
-        pStdRes->usum += plist[i];
-        pStdRes->quadraticUSum += plist[i] * plist[i];
+        double nr = (double)plist[i];
+        if (pStdRes->count == 1) {
+          pStdRes->dsum = nr;
+        } else {
+          double          s_kminusone = pStdRes->dsum;
+          volatile double diff = nr - s_kminusone;
+          pStdRes->dsum = s_kminusone + diff / (double)pStdRes->count;
+          pStdRes->quadraticDSum += diff * (nr - pStdRes->dsum);
+        }
       }
       break;
     }
@@ -1298,14 +1261,21 @@ int32_t stdFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_UINT: {
       uint32_t* plist = (uint32_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
         numOfElem += 1;
         pStdRes->count += 1;
-        pStdRes->usum += plist[i];
-        pStdRes->quadraticUSum += plist[i] * plist[i];
+        double nr = (double)plist[i];
+        if (pStdRes->count == 1) {
+          pStdRes->dsum = nr;
+        } else {
+          double          s_kminusone = pStdRes->dsum;
+          volatile double diff = nr - s_kminusone;
+          pStdRes->dsum = s_kminusone + diff / (double)pStdRes->count;
+          pStdRes->quadraticDSum += diff * (nr - pStdRes->dsum);
+        }
       }
 
       break;
@@ -1314,14 +1284,21 @@ int32_t stdFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_UBIGINT: {
       uint64_t* plist = (uint64_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
         numOfElem += 1;
         pStdRes->count += 1;
-        pStdRes->usum += plist[i];
-        pStdRes->quadraticUSum += plist[i] * plist[i];
+        double nr = (double)plist[i];
+        if (pStdRes->count == 1) {
+          pStdRes->dsum = nr;
+        } else {
+          double          s_kminusone = pStdRes->dsum;
+          volatile double diff = nr - s_kminusone;
+          pStdRes->dsum = s_kminusone + diff / (double)pStdRes->count;
+          pStdRes->quadraticDSum += diff * (nr - pStdRes->dsum);
+        }
       }
       break;
     }
@@ -1329,14 +1306,21 @@ int32_t stdFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_FLOAT: {
       float* plist = (float*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
         numOfElem += 1;
         pStdRes->count += 1;
-        pStdRes->dsum += plist[i];
-        pStdRes->quadraticDSum += plist[i] * plist[i];
+        double nr = (double)plist[i];
+        if (pStdRes->count == 1) {
+          pStdRes->dsum = nr;
+        } else {
+          double          s_kminusone = pStdRes->dsum;
+          volatile double diff = nr - s_kminusone;
+          pStdRes->dsum = s_kminusone + diff / (double)pStdRes->count;
+          pStdRes->quadraticDSum += diff * (nr - pStdRes->dsum);
+        }
       }
       break;
     }
@@ -1344,14 +1328,21 @@ int32_t stdFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_DOUBLE: {
       double* plist = (double*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
         numOfElem += 1;
         pStdRes->count += 1;
-        pStdRes->dsum += plist[i];
-        pStdRes->quadraticDSum += plist[i] * plist[i];
+        double nr = (double)plist[i];
+        if (pStdRes->count == 1) {
+          pStdRes->dsum = nr;
+        } else {
+          double          s_kminusone = pStdRes->dsum;
+          volatile double diff = nr - s_kminusone;
+          pStdRes->dsum = s_kminusone + diff / (double)pStdRes->count;
+          pStdRes->quadraticDSum += diff * (nr - pStdRes->dsum);
+        }
       }
       break;
     }
@@ -1371,18 +1362,25 @@ static void stdTransferInfo(SStdRes* pInput, SStdRes* pOutput) {
     return;
   }
   pOutput->type = pInput->type;
-  if (IS_SIGNED_NUMERIC_TYPE(pOutput->type)) {
-    pOutput->quadraticISum += pInput->quadraticISum;
-    pOutput->isum += pInput->isum;
-  } else if (IS_UNSIGNED_NUMERIC_TYPE(pOutput->type)) {
-    pOutput->quadraticUSum += pInput->quadraticUSum;
-    pOutput->usum += pInput->usum;
-  } else {
+  if (pOutput->count == 0) {
     pOutput->quadraticDSum += pInput->quadraticDSum;
     pOutput->dsum += pInput->dsum;
-  }
+    pOutput->count = pInput->count;
+  } else if (pInput->count > 0) {
+    double totalCount = pOutput->count + pInput->count;
+    double totalSum = pInput->count * pInput->dsum + pOutput->count * pOutput->dsum;
+    double mean = totalSum / totalCount;
 
-  pOutput->count += pInput->count;
+    /*
+    pOutput->quadraticDSum += pInput->quadraticDSum + pInput->count * pInput->dsum * pInput->dsum +
+                              pOutput->count * pOutput->dsum * pOutput->dsum - totalSum * mean;
+    */
+
+    double diff = pInput->dsum - pOutput->dsum;
+    pOutput->quadraticDSum += pInput->quadraticDSum + pInput->count * pOutput->count * (diff * diff) / totalCount;
+    pOutput->dsum = mean;
+    pOutput->count += pInput->count;
+  }
 }
 
 int32_t stdFunctionMerge(SqlFunctionCtx* pCtx) {
@@ -1411,73 +1409,6 @@ int32_t stdFunctionMerge(SqlFunctionCtx* pCtx) {
   return TSDB_CODE_SUCCESS;
 }
 
-#ifdef BUILD_NO_CALL
-int32_t stdInvertFunction(SqlFunctionCtx* pCtx) {
-  int32_t numOfElem = 0;
-
-  // Only the pre-computing information loaded and actual data does not loaded
-  SInputColumnInfoData* pInput = &pCtx->input;
-  int32_t               type = pInput->pData[0]->info.type;
-
-  SStdRes* pStdRes = GET_ROWCELL_INTERBUF(GET_RES_INFO(pCtx));
-
-  // computing based on the true data block
-  SColumnInfoData* pCol = pInput->pData[0];
-
-  int32_t start = pInput->startRowIndex;
-  int32_t numOfRows = pInput->numOfRows;
-
-  switch (type) {
-    case TSDB_DATA_TYPE_TINYINT: {
-      LIST_STDDEV_SUB_N(pStdRes->isum, int8_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_SMALLINT: {
-      LIST_STDDEV_SUB_N(pStdRes->isum, int16_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_INT: {
-      LIST_STDDEV_SUB_N(pStdRes->isum, int32_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_BIGINT: {
-      LIST_STDDEV_SUB_N(pStdRes->isum, int64_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_UTINYINT: {
-      LIST_STDDEV_SUB_N(pStdRes->isum, uint8_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_USMALLINT: {
-      LIST_STDDEV_SUB_N(pStdRes->isum, uint16_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_UINT: {
-      LIST_STDDEV_SUB_N(pStdRes->isum, uint32_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_UBIGINT: {
-      LIST_STDDEV_SUB_N(pStdRes->isum, uint64_t);
-      break;
-    }
-    case TSDB_DATA_TYPE_FLOAT: {
-      LIST_STDDEV_SUB_N(pStdRes->dsum, float);
-      break;
-    }
-    case TSDB_DATA_TYPE_DOUBLE: {
-      LIST_STDDEV_SUB_N(pStdRes->dsum, double);
-      break;
-    }
-    default:
-      break;
-  }
-
-  // data in the check operation are all null, not output
-  SET_VAL(GET_RES_INFO(pCtx), numOfElem, 1);
-  return TSDB_CODE_SUCCESS;
-}
-#endif
-
 int32_t stddevFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
   SInputColumnInfoData* pInput = &pCtx->input;
   SStdRes*              pStddevRes = GET_ROWCELL_INTERBUF(GET_RES_INFO(pCtx));
@@ -1486,18 +1417,14 @@ int32_t stddevFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
 
   if (pStddevRes->count == 0) {
     GET_RES_INFO(pCtx)->numOfRes = 0;
+
     return functionFinalize(pCtx, pBlock);
   }
 
-  if (IS_SIGNED_NUMERIC_TYPE(type)) {
-    avg = pStddevRes->isum / ((double)pStddevRes->count);
-    pStddevRes->result = sqrt(fabs(pStddevRes->quadraticISum / ((double)pStddevRes->count) - avg * avg));
-  } else if (IS_UNSIGNED_NUMERIC_TYPE(type)) {
-    avg = pStddevRes->usum / ((double)pStddevRes->count);
-    pStddevRes->result = sqrt(fabs(pStddevRes->quadraticUSum / ((double)pStddevRes->count) - avg * avg));
+  if (pStddevRes->count == 1) {
+    pStddevRes->result = 0.0;
   } else {
-    avg = pStddevRes->dsum / ((double)pStddevRes->count);
-    pStddevRes->result = sqrt(fabs(pStddevRes->quadraticDSum / ((double)pStddevRes->count) - avg * avg));
+    pStddevRes->result = sqrt(pStddevRes->quadraticDSum / pStddevRes->count);
   }
 
   // check for overflow
@@ -1519,15 +1446,10 @@ int32_t stdvarFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
     return functionFinalize(pCtx, pBlock);
   }
 
-  if (IS_SIGNED_NUMERIC_TYPE(type)) {
-    avg = pStdvarRes->isum / ((double)pStdvarRes->count);
-    pStdvarRes->result = fabs(pStdvarRes->quadraticISum / ((double)pStdvarRes->count) - avg * avg);
-  } else if (IS_UNSIGNED_NUMERIC_TYPE(type)) {
-    avg = pStdvarRes->usum / ((double)pStdvarRes->count);
-    pStdvarRes->result = fabs(pStdvarRes->quadraticUSum / ((double)pStdvarRes->count) - avg * avg);
+  if (pStdvarRes->count == 1) {
+    pStdvarRes->result = 0.0;
   } else {
-    avg = pStdvarRes->dsum / ((double)pStdvarRes->count);
-    pStdvarRes->result = fabs(pStdvarRes->quadraticDSum / ((double)pStdvarRes->count) - avg * avg);
+    pStdvarRes->result = pStdvarRes->quadraticDSum / pStdvarRes->count;
   }
 
   // check for overflow
@@ -1578,6 +1500,218 @@ int32_t stdCombine(SqlFunctionCtx* pDestCtx, SqlFunctionCtx* pSourceCtx) {
   return TSDB_CODE_SUCCESS;
 }
 
+int32_t stddevsampFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
+  SInputColumnInfoData* pInput = &pCtx->input;
+  SStdRes*              pStddevRes = GET_ROWCELL_INTERBUF(GET_RES_INFO(pCtx));
+  double                avg;
+
+  if (pStddevRes->count == 0) {
+    GET_RES_INFO(pCtx)->numOfRes = 0;
+    return functionFinalize(pCtx, pBlock);
+  }
+
+  if (pStddevRes->count == 1) {
+    pStddevRes->result = 0.0;
+  } else {
+    pStddevRes->result = sqrt(pStddevRes->quadraticDSum / (pStddevRes->count - 1));
+  }
+
+  // check for overflow
+  if (isinf(pStddevRes->result) || isnan(pStddevRes->result)) {
+    GET_RES_INFO(pCtx)->numOfRes = 0;
+  }
+
+  return functionFinalize(pCtx, pBlock);
+}
+
+int32_t stdvarsampFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
+  SInputColumnInfoData* pInput = &pCtx->input;
+  SStdRes*              pStddevRes = GET_ROWCELL_INTERBUF(GET_RES_INFO(pCtx));
+  double                avg;
+
+  if (pStddevRes->count == 0) {
+    GET_RES_INFO(pCtx)->numOfRes = 0;
+    return functionFinalize(pCtx, pBlock);
+  }
+
+  if (pStddevRes->count == 1) {
+    pStddevRes->result = 0.0;
+  } else {
+    pStddevRes->result = pStddevRes->quadraticDSum / (pStddevRes->count - 1);
+  }
+
+  // check for overflow
+  if (isinf(pStddevRes->result) || isnan(pStddevRes->result)) {
+    GET_RES_INFO(pCtx)->numOfRes = 0;
+  }
+
+  return functionFinalize(pCtx, pBlock);
+}
+
+bool gconcatGetFuncEnv(SFunctionNode* pFunc, SFuncExecEnv* pEnv) {
+  pEnv->calcMemSize = sizeof(SGconcatRes);
+  return true;
+}
+
+int32_t gconcatFunctionSetup(SqlFunctionCtx* pCtx, SResultRowEntryInfo* pResultInfo) {
+  if (pResultInfo->initialized) {
+    return TSDB_CODE_SUCCESS;
+  }
+  if (TSDB_CODE_SUCCESS != functionSetup(pCtx, pResultInfo)) {
+    return TSDB_CODE_FUNC_SETUP_ERROR;
+  }
+
+  SGconcatRes* pRes = GET_ROWCELL_INTERBUF(pResultInfo);
+  (void)memset(pRes, 0, sizeof(SGconcatRes));
+
+  // pRes->separator = varDataVal(pCtx->param[0].param.pz);
+
+  int32_t sepParamIdx = pCtx->numOfParams - 1;
+  pRes->separator = pCtx->param[sepParamIdx].param.pz;
+  pRes->type = pCtx->param[sepParamIdx].param.nType;
+
+  /*
+  SInputColumnInfoData* pInput = &pCtx->input;
+  int32_t               type = pInput->pData[0]->info.type;
+
+  pRes->nchar = (type == TSDB_DATA_TYPE_NCHAR);
+  */
+
+  return TSDB_CODE_SUCCESS;
+}
+
+static int32_t gconcatHelper(const char* input, char* output, bool hasNchar, int32_t type, VarDataLenT* dataLen,
+                             void* charsetCxt) {
+  if (input == NULL) {
+    return TSDB_CODE_SUCCESS;
+  }
+  if (hasNchar && type == TSDB_DATA_TYPE_VARCHAR) {
+    TdUcs4* newBuf = taosMemoryCalloc((varDataLen(input) + 1) * TSDB_NCHAR_SIZE, 1);
+    if (NULL == newBuf) {
+      return terrno;
+    }
+    int32_t len = varDataLen(input);
+    bool    ret =
+        taosMbsToUcs4(varDataVal(input), len, newBuf, (varDataLen(input) + 1) * TSDB_NCHAR_SIZE, &len, charsetCxt);
+    if (!ret) {
+      taosMemoryFree(newBuf);
+      return TSDB_CODE_SCALAR_CONVERT_ERROR;
+    }
+    (void)memcpy(varDataVal(output) + *dataLen, newBuf, len);
+    *dataLen += len;
+    taosMemoryFree(newBuf);
+  } else {
+    (void)memcpy(varDataVal(output) + *dataLen, varDataVal(input), varDataLen(input));
+    *dataLen += varDataLen(input);
+  }
+
+  return TSDB_CODE_SUCCESS;
+}
+
+int32_t gconcatFunction(SqlFunctionCtx* pCtx) {
+  int32_t               code = 0, numOfElem = 0;
+  SInputColumnInfoData* pInput = &pCtx->input;
+  int32_t               rowStart = pInput->startRowIndex;
+  int32_t               numOfRows = pInput->numOfRows;
+  int32_t               numOfCols = pInput->numOfInputCols;
+  SResultRowEntryInfo*  pResInfo = GET_RES_INFO(pCtx);
+  SGconcatRes*          pRes = GET_ROWCELL_INTERBUF(pResInfo);
+  char*                 sep = pRes->separator;
+  bool                  hasNchar = pRes->nchar;
+  VarDataLenT           dataLen = 0;
+  bool                  hasResultValue = (pResInfo->numOfRes > 0);
+
+  if (!pRes->result) {
+    pRes->result = taosMemoryCalloc(1, TSDB_MAX_FIELD_LEN);
+    if (!pRes->result) {
+      return terrno;
+    }
+
+    varDataSetLen(pRes->result, 0);
+
+    for (int c = 0; c < numOfCols - 1; ++c) {
+      SColumnInfoData* pCol = pInput->pData[c];
+      int32_t          type = pCol->info.type;
+
+      if (TSDB_DATA_TYPE_NCHAR == type) {
+        pRes->nchar = true;
+      }
+    }
+  } else {
+    dataLen = varDataLen(pRes->result);
+  }
+
+  hasNchar = pRes->nchar;
+
+  // computing based on the true data block
+  char*            buf = pRes->result;
+  SColumnInfoData* pCol = pInput->pData[numOfCols - 1];
+
+  sep = colDataGetData(pCol, 0);
+  pRes->type = pCol->info.type;
+  for (int r = rowStart; r < rowStart + numOfRows; ++r) {
+    bool rowHasValue = false;
+
+    for (int c = 0; c < numOfCols - 1; ++c) {
+      SColumnInfoData* pCol = pInput->pData[c];
+      int32_t          type = pCol->info.type;
+
+      if (IS_NULL_TYPE(type) || colDataIsNull_s(pCol, r)) {
+        continue;
+      }
+
+      if (!rowHasValue && hasResultValue) {
+        // concat the separator before the first non-null value of this row
+        code = gconcatHelper(sep, buf, hasNchar, pRes->type, &dataLen, NULL);
+        if (code) {
+          goto _over;
+        }
+      }
+
+      // concat this row's all columns
+      code = gconcatHelper(colDataGetData(pCol, r), buf, hasNchar, pInput->pData[c]->info.type, &dataLen, NULL);
+      if (code) {
+        goto _over;
+      }
+
+      rowHasValue = true;
+    }
+
+    hasResultValue |= rowHasValue;
+  }
+
+  varDataSetLen(buf, dataLen);
+  if (hasResultValue) {
+    numOfElem += 1;
+  }
+
+_over:
+  // data in the check operation are all null, not output
+  SET_VAL(GET_RES_INFO(pCtx), numOfElem, 1);
+  return code;
+}
+
+int32_t gconcatFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
+  int32_t               code = 0;
+  SInputColumnInfoData* pInput = &pCtx->input;
+  SGconcatRes*          pRes = GET_ROWCELL_INTERBUF(GET_RES_INFO(pCtx));
+  SResultRowEntryInfo*  pResInfo = GET_RES_INFO(pCtx);
+  int32_t               slotId = pCtx->pExpr->base.resSchema.slotId;
+  SColumnInfoData*      pCol = taosArrayGet(pBlock->pDataBlock, slotId);
+
+  if (NULL == pCol) {
+    taosMemoryFree(pRes->result);
+    return TSDB_CODE_OUT_OF_RANGE;
+  }
+
+  pResInfo->isNullRes = (pResInfo->numOfRes == 0) ? 1 : 0;
+  code = colDataSetVal(pCol, pBlock->info.rows, pRes->result, pResInfo->isNullRes);
+
+  taosMemoryFree(pRes->result);
+
+  return code;
+}
+
 bool getLeastSQRFuncEnv(SFunctionNode* pFunc, SFuncExecEnv* pEnv) {
   pEnv->calcMemSize = sizeof(SLeastSQRInfo);
   return true;
@@ -1620,7 +1754,7 @@ int32_t leastSQRFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_TINYINT: {
       int8_t* plist = (int8_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
         numOfElem++;
@@ -1631,7 +1765,7 @@ int32_t leastSQRFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_SMALLINT: {
       int16_t* plist = (int16_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -1644,7 +1778,7 @@ int32_t leastSQRFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_INT: {
       int32_t* plist = (int32_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -1657,7 +1791,7 @@ int32_t leastSQRFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_BIGINT: {
       int64_t* plist = (int64_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -1670,7 +1804,7 @@ int32_t leastSQRFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_UTINYINT: {
       uint8_t* plist = (uint8_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
         numOfElem++;
@@ -1681,7 +1815,7 @@ int32_t leastSQRFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_USMALLINT: {
       uint16_t* plist = (uint16_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -1694,7 +1828,7 @@ int32_t leastSQRFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_UINT: {
       uint32_t* plist = (uint32_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -1707,7 +1841,7 @@ int32_t leastSQRFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_UBIGINT: {
       uint64_t* plist = (uint64_t*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -1720,7 +1854,7 @@ int32_t leastSQRFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_FLOAT: {
       float* plist = (float*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -1733,7 +1867,7 @@ int32_t leastSQRFunction(SqlFunctionCtx* pCtx) {
     case TSDB_DATA_TYPE_DOUBLE: {
       double* plist = (double*)pCol->pData;
       for (int32_t i = start; i < numOfRows + pInput->startRowIndex; ++i) {
-        if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -1799,11 +1933,11 @@ int32_t leastSQRFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
   char buf[LEASTSQUARES_BUFF_LENGTH] = {0};
   char slopBuf[64] = {0};
   char interceptBuf[64] = {0};
-  int  n = tsnprintf(slopBuf, 64, "%.6lf", param02);
+  int  n = snprintf(slopBuf, 64, "%.6lf", param02);
   if (n > LEASTSQUARES_DOUBLE_ITEM_LENGTH) {
     (void)snprintf(slopBuf, 64, "%." DOUBLE_PRECISION_DIGITS, param02);
   }
-  n = tsnprintf(interceptBuf, 64, "%.6lf", param12);
+  n = snprintf(interceptBuf, 64, "%.6lf", param12);
   if (n > LEASTSQUARES_DOUBLE_ITEM_LENGTH) {
     (void)snprintf(interceptBuf, 64, "%." DOUBLE_PRECISION_DIGITS, param12);
   }
@@ -1891,8 +2025,8 @@ int32_t percentileFunction(SqlFunctionCtx* pCtx) {
       pResInfo->complete = true;
       return TSDB_CODE_SUCCESS;
     } else {
-      code = tMemBucketCreate(pCol->info.bytes, type, typeGetTypeModFromColInfo(&pCol->info), pInfo->minval, pInfo->maxval, pCtx->hasWindowOrGroup,
-                              &pInfo->pMemBucket, pInfo->numOfElems);
+      code = tMemBucketCreate(pCol->info.bytes, type, typeGetTypeModFromColInfo(&pCol->info), pInfo->minval,
+                              pInfo->maxval, pCtx->hasWindowOrGroup, &pInfo->pMemBucket, pInfo->numOfElems);
       if (TSDB_CODE_SUCCESS != code) {
         return code;
       }
@@ -1927,7 +2061,7 @@ int32_t percentileFunction(SqlFunctionCtx* pCtx) {
       // check the valid data one by one
       int32_t start = pInput->startRowIndex;
       for (int32_t i = start; i < pInput->numOfRows + start; ++i) {
-        if (colDataIsNull_f(pCol->nullbitmap, i)) {
+        if (colDataIsNull_f(pCol, i)) {
           continue;
         }
 
@@ -1950,7 +2084,7 @@ int32_t percentileFunction(SqlFunctionCtx* pCtx) {
     // the second stage, calculate the true percentile value
     int32_t start = pInput->startRowIndex;
     for (int32_t i = start; i < pInput->numOfRows + start; ++i) {
-      if (colDataIsNull_f(pCol->nullbitmap, i)) {
+      if (colDataIsNull_f(pCol, i)) {
         continue;
       }
 
@@ -1997,9 +2131,9 @@ int32_t percentileFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
         }
 
         if (i == pCtx->numOfParams - 1) {
-          len += tsnprintf(varDataVal(buf) + len, sizeof(buf) - VARSTR_HEADER_SIZE - len, "%.6lf]", ppInfo->result);
+          len += snprintf(varDataVal(buf) + len, sizeof(buf) - VARSTR_HEADER_SIZE - len, "%.6lf]", ppInfo->result);
         } else {
-          len += tsnprintf(varDataVal(buf) + len, sizeof(buf) - VARSTR_HEADER_SIZE - len, "%.6lf, ", ppInfo->result);
+          len += snprintf(varDataVal(buf) + len, sizeof(buf) - VARSTR_HEADER_SIZE - len, "%.6lf, ", ppInfo->result);
         }
       }
 
@@ -2129,7 +2263,7 @@ int32_t apercentileFunction(SqlFunctionCtx* pCtx) {
     buildTDigestInfo(pInfo);
     tdigestAutoFill(pInfo->pTDigest, COMPRESSION);
     for (int32_t i = start; i < pInput->numOfRows + start; ++i) {
-      if (colDataIsNull_f(pCol->nullbitmap, i)) {
+      if (colDataIsNull_f(pCol, i)) {
         continue;
       }
       numOfElems += 1;
@@ -2151,7 +2285,7 @@ int32_t apercentileFunction(SqlFunctionCtx* pCtx) {
            __FUNCTION__, numOfElems, pInfo->pHisto->numOfElems, pInfo->pHisto->numOfEntries, pInfo->pHisto,
            pInfo->pHisto->elems);
     for (int32_t i = start; i < pInput->numOfRows + start; ++i) {
-      if (colDataIsNull_f(pCol->nullbitmap, i)) {
+      if (colDataIsNull_f(pCol, i)) {
         continue;
       }
       numOfElems += 1;
@@ -2468,6 +2602,12 @@ bool getSelectivityFuncEnv(SFunctionNode* pFunc, SFuncExecEnv* pEnv) {
   return true;
 }
 
+
+bool getHasNullFuncEnv(SFunctionNode* pFunc, SFuncExecEnv* pEnv) {
+  pEnv->calcMemSize = pFunc->node.resType.bytes;
+  return true;
+}
+
 bool getGroupKeyFuncEnv(SFunctionNode* pFunc, SFuncExecEnv* pEnv) {
   SColumnNode* pNode = (SColumnNode*)nodesListGetNode(pFunc->pParameterList, 0);
   pEnv->calcMemSize = sizeof(SGroupKeyInfo) + pNode->node.resType.bytes;
@@ -2490,7 +2630,7 @@ int32_t firstLastFunctionSetup(SqlFunctionCtx* pCtx, SResultRowEntryInfo* pResIn
     return TSDB_CODE_FUNC_SETUP_ERROR;
   }
 
-  SFirstLastRes*        pRes = GET_ROWCELL_INTERBUF(pResInfo);
+  SFirstLastRes* pRes = GET_ROWCELL_INTERBUF(pResInfo);
   pRes->nullTupleSaved = false;
   pRes->nullTuplePos.pageId = -1;
   return TSDB_CODE_SUCCESS;
@@ -2525,7 +2665,8 @@ static int32_t firstlastSaveTupleData(const SSDataBlock* pSrcBlock, int32_t rowI
     code = saveTupleData(pCtx, rowIndex, pSrcBlock, &pInfo->pos);
   } else if (!noElements) {
     code = updateTupleData(pCtx, rowIndex, pSrcBlock, &pInfo->pos);
-  } else { } // dothing
+  } else {
+  }  // dothing
 
   return code;
 }
@@ -2536,21 +2677,23 @@ static int32_t doSaveCurrentVal(SqlFunctionCtx* pCtx, int32_t rowIndex, int64_t 
   SFirstLastRes*       pInfo = GET_ROWCELL_INTERBUF(pResInfo);
 
   if (IS_VAR_DATA_TYPE(type)) {
-    if (type == TSDB_DATA_TYPE_JSON) {
-      pInfo->bytes = getJsonValueLen(pData);
-    } else {
-      pInfo->bytes = varDataTLen(pData);
-    }
+    pInfo->bytes = calcStrBytesByType(type, pData);
+    // if (type == TSDB_DATA_TYPE_JSON) {
+    //   pInfo->bytes = getJsonValueLen(pData);
+    // } else {
+    //   pInfo->bytes = varDataTLen(pData);
+    // }
   }
 
   (void)memcpy(pInfo->buf, pData, pInfo->bytes);
   if (pkData != NULL) {
     if (IS_VAR_DATA_TYPE(pInfo->pkType)) {
-      if (pInfo->pkType == TSDB_DATA_TYPE_JSON) {
-        pInfo->pkBytes = getJsonValueLen(pkData);
-      } else {
-        pInfo->pkBytes = varDataTLen(pkData);
-      }
+      pInfo->pkBytes = calcStrBytesByType(pInfo->pkType, pkData);
+      // if (pInfo->pkType == TSDB_DATA_TYPE_JSON) {
+      //   pInfo->pkBytes = getJsonValueLen(pkData);
+      // } else {
+      //   pInfo->pkBytes = varDataTLen(pkData);
+      // }
     }
     (void)memcpy(pInfo->buf + pInfo->bytes, pkData, pInfo->pkBytes);
     pInfo->pkData = pInfo->buf + pInfo->bytes;
@@ -2854,7 +2997,10 @@ int32_t lastFunction(SqlFunctionCtx* pCtx) {
 
       numOfElems++;
       char* pkData = NULL;
-      if (pCtx->hasPrimaryKey) {
+      if (pCtx->hasPrimaryKey && !colDataIsNull_s(pkCol, i)) {
+        // pkCol[i] might be null when using cachemodel
+        // however, if using cachemodel, we don't need pk to determine the order
+        // because ts is enough
         pkData = colDataGetData(pkCol, i);
       }
       if (pResInfo->numOfRes == 0 || pInfo->ts < pts[i] ||
@@ -3011,6 +3157,9 @@ int32_t firstLastFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
 
   // handle selectivity
   code = setSelectivityValue(pCtx, pBlock, &pRes->pos, pBlock->info.rows);
+  if (TSDB_CODE_SUCCESS != code) {
+    qError("%s failed at %d, msg:%s", __func__, __LINE__, tstrerror(code));
+  }
 
   return code;
 }
@@ -3079,11 +3228,12 @@ static int32_t doSaveLastrow(SqlFunctionCtx* pCtx, char* pData, int32_t rowIndex
     pInfo->isNull = false;
 
     if (IS_VAR_DATA_TYPE(pInputCol->info.type)) {
-      if (pInputCol->info.type == TSDB_DATA_TYPE_JSON) {
-        pInfo->bytes = getJsonValueLen(pData);
-      } else {
-        pInfo->bytes = varDataTLen(pData);
-      }
+      pInfo->bytes = calcStrBytesByType(pInputCol->info.type, pData);
+      // if (pInputCol->info.type == TSDB_DATA_TYPE_JSON) {
+      //   pInfo->bytes = getJsonValueLen(pData);
+      // } else {
+      //   pInfo->bytes = varDataTLen(pData);
+      // }
     }
 
     (void)memcpy(pInfo->buf, pData, pInfo->bytes);
@@ -3092,11 +3242,7 @@ static int32_t doSaveLastrow(SqlFunctionCtx* pCtx, char* pData, int32_t rowIndex
   if (pCtx->hasPrimaryKey && !colDataIsNull_s(pkCol, rowIndex)) {
     char* pkData = colDataGetData(pkCol, rowIndex);
     if (IS_VAR_DATA_TYPE(pInfo->pkType)) {
-      if (pInfo->pkType == TSDB_DATA_TYPE_JSON) {
-        pInfo->pkBytes = getJsonValueLen(pkData);
-      } else {
-        pInfo->pkBytes = varDataTLen(pkData);
-      }
+      pInfo->pkBytes = calcStrBytesByType(pInfo->pkType, pkData);
     }
     (void)memcpy(pInfo->buf + pInfo->bytes, pkData, pInfo->pkBytes);
     pInfo->pkData = pInfo->buf + pInfo->bytes;
@@ -3153,7 +3299,7 @@ int32_t lastRowFunction(SqlFunctionCtx* pCtx) {
 
       break;
     }
-  } else if (!pCtx->hasPrimaryKey && pCtx->order == TSDB_ORDER_DESC) {
+  } else if (pCtx->order == TSDB_ORDER_DESC && !pCtx->hasPrimaryKey) {
     // the optimized version only valid if all tuples in one block are monotonious increasing or descreasing.
     // this assumption is NOT always works if project operator exists in downstream.
     for (int32_t i = pInput->startRowIndex; i < pInput->numOfRows + pInput->startRowIndex; ++i) {
@@ -3409,6 +3555,9 @@ static int32_t doHandleDiff(SDiffInfo* pDiffInfo, int32_t type, const char* pv, 
 bool funcInputGetNextRowIndex(SInputColumnInfoData* pInput, int32_t from, bool firstOccur, int32_t* pRowIndex,
                               int32_t* nextFrom) {
   if (pInput->pPrimaryKey == NULL) {
+    if (pInput->numOfRows == 0) {
+      return false;
+    }
     if (from == -1) {
       from = pInput->startRowIndex;
     } else if (from >= pInput->numOfRows + pInput->startRowIndex) {
@@ -3445,7 +3594,7 @@ bool funcInputGetNextRowIndex(SInputColumnInfoData* pInput, int32_t from, bool f
 }
 
 bool getForecastConfEnv(SFunctionNode* UNUSED_PARAM(pFunc), SFuncExecEnv* pEnv) {
-  pEnv->calcMemSize = sizeof(float);
+  pEnv->calcMemSize = sizeof(double);
   return true;
 }
 
@@ -3637,6 +3786,1090 @@ _exit:
   return code;
 }
 
+typedef struct {
+  SArray* pLagTail;
+  SArray* pLeadPending;
+} SLagLeadState;
+
+bool getLagFuncEnv(SFunctionNode* UNUSED_PARAM(pFunc), SFuncExecEnv* pEnv) {
+  pEnv->calcMemSize = sizeof(SLagLeadState);
+  return true;
+}
+
+int32_t lagFunctionSetup(SqlFunctionCtx* pCtx, SResultRowEntryInfo* pResInfo) {
+  if (pResInfo->initialized) {
+    return TSDB_CODE_SUCCESS;
+  }
+  if (TSDB_CODE_SUCCESS != functionSetup(pCtx, pResInfo)) {
+    return TSDB_CODE_FUNC_SETUP_ERROR;
+  }
+
+  SLagLeadState* pState = GET_ROWCELL_INTERBUF(pResInfo);
+  if (pState != NULL) {
+    pState->pLagTail = NULL;
+    pState->pLeadPending = NULL;
+  }
+
+  return TSDB_CODE_SUCCESS;
+}
+
+int32_t lagFunction(SqlFunctionCtx* UNUSED_PARAM(pCtx)) { return TSDB_CODE_SUCCESS; }
+
+typedef struct {
+  bool        isDataNull;
+  char*       pData;
+  int32_t     dataLen;
+  SSDataBlock* block;
+  int32_t     rowIndex;
+} SLagLeadRowValue;
+
+typedef struct {
+  int32_t outputPos;
+  int64_t needIdx;
+} SLeadPendingItem;
+
+static void cleanupLagLeadRowValueArray(SArray* pValues) {
+  if (pValues == NULL) {
+    return;
+  }
+
+  int32_t size = taosArrayGetSize(pValues);
+  for (int32_t i = 0; i < size; ++i) {
+    SLagLeadRowValue* pValue = (SLagLeadRowValue*)taosArrayGet(pValues, i);
+    if (pValue != NULL && pValue->pData != NULL) {
+      taosMemoryFree(pValue->pData);
+      pValue->pData = NULL;
+    }
+  }
+
+  taosArrayDestroy(pValues);
+}
+
+static void cleanupLagLeadValueArrays(SArray* pValueArrays) {
+  if (pValueArrays == NULL) {
+    return;
+  }
+
+  int32_t size = taosArrayGetSize(pValueArrays);
+  for (int32_t i = 0; i < size; ++i) {
+    SArray** ppValues = (SArray**)taosArrayGet(pValueArrays, i);
+    if (ppValues != NULL && *ppValues != NULL) {
+      cleanupLagLeadRowValueArray(*ppValues);
+    }
+  }
+
+  taosArrayDestroy(pValueArrays);
+}
+
+static int32_t copyLagLeadRowValue(SqlFunctionCtx* pCtx, SFuncInputRow* pRow, SLagLeadRowValue* pValue) {
+  pValue->isDataNull = pRow->isDataNull;
+  pValue->pData = NULL;
+  pValue->dataLen = 0;
+  pValue->block = pRow->block;
+  pValue->rowIndex = pRow->rowIndex;
+
+  if (pRow->isDataNull) {
+    return TSDB_CODE_SUCCESS;
+  }
+
+  SColumnInfoData* pInputCol = pCtx->input.pData[0];
+  int32_t          dataLen = pInputCol->info.bytes;
+  if (IS_VAR_DATA_TYPE(pInputCol->info.type)) {
+    dataLen = IS_STR_DATA_BLOB(pInputCol->info.type) ? blobDataTLen(pRow->pData) : varDataTLen(pRow->pData);
+  }
+  pValue->dataLen = dataLen;
+  pValue->pData = taosMemoryMalloc(dataLen);
+  if (pValue->pData == NULL) {
+    return terrno;
+  }
+
+  (void)memcpy(pValue->pData, pRow->pData, dataLen);
+  return TSDB_CODE_SUCCESS;
+}
+
+static int32_t setLagLeadDefaultValue(SqlFunctionCtx* pCtx, int32_t pos) {
+  if (pCtx->numOfParams < 3) {
+    colDataSetNULL((SColumnInfoData*)pCtx->pOutput, pos);
+    return TSDB_CODE_SUCCESS;
+  }
+
+  SVariant* pDefault = &pCtx->param[2].param;
+
+  if (IS_NULL_TYPE(pDefault->nType)) {
+    colDataSetNULL((SColumnInfoData*)pCtx->pOutput, pos);
+    return TSDB_CODE_SUCCESS;
+  }
+
+  SColumnInfoData* pOutput = (SColumnInfoData*)pCtx->pOutput;
+  uint8_t          type = pOutput->info.type;
+  STypeMod         inputTypeMod = pCtx->param[2].pCol == NULL ? 0 : typeGetTypeModFromCol(pCtx->param[2].pCol);
+  int32_t          retCode = TSDB_CODE_SUCCESS;
+
+  switch (type) {
+    case TSDB_DATA_TYPE_BOOL: {
+      bool v = false;
+      GET_TYPED_DATA(v, bool, pDefault->nType, &pDefault->i, inputTypeMod);
+      retCode = colDataSetVal(pOutput, pos, (const char*)&v, false);
+      break;
+    }
+    case TSDB_DATA_TYPE_TINYINT: {
+      int8_t v = 0;
+      GET_TYPED_DATA(v, int8_t, pDefault->nType, &pDefault->i, inputTypeMod);
+      retCode = colDataSetVal(pOutput, pos, (const char*)&v, false);
+      break;
+    }
+    case TSDB_DATA_TYPE_UTINYINT: {
+      uint8_t v = 0;
+      GET_TYPED_DATA(v, uint8_t, pDefault->nType, &pDefault->i, inputTypeMod);
+      retCode = colDataSetVal(pOutput, pos, (const char*)&v, false);
+      break;
+    }
+    case TSDB_DATA_TYPE_SMALLINT: {
+      int16_t v = 0;
+      GET_TYPED_DATA(v, int16_t, pDefault->nType, &pDefault->i, inputTypeMod);
+      retCode = colDataSetVal(pOutput, pos, (const char*)&v, false);
+      break;
+    }
+    case TSDB_DATA_TYPE_USMALLINT: {
+      uint16_t v = 0;
+      GET_TYPED_DATA(v, uint16_t, pDefault->nType, &pDefault->i, inputTypeMod);
+      retCode = colDataSetVal(pOutput, pos, (const char*)&v, false);
+      break;
+    }
+    case TSDB_DATA_TYPE_INT: {
+      int32_t v = 0;
+      GET_TYPED_DATA(v, int32_t, pDefault->nType, &pDefault->i, inputTypeMod);
+      retCode = colDataSetVal(pOutput, pos, (const char*)&v, false);
+      break;
+    }
+    case TSDB_DATA_TYPE_UINT: {
+      uint32_t v = 0;
+      GET_TYPED_DATA(v, uint32_t, pDefault->nType, &pDefault->i, inputTypeMod);
+      retCode = colDataSetVal(pOutput, pos, (const char*)&v, false);
+      break;
+    }
+    case TSDB_DATA_TYPE_BIGINT:
+    case TSDB_DATA_TYPE_TIMESTAMP: {
+      if (type == TSDB_DATA_TYPE_TIMESTAMP && IS_STR_DATA_TYPE(pDefault->nType)) {
+        int64_t tsVal = 0;
+        int32_t cvtCode = convertStringToTimestamp(pDefault->nType, pDefault->pz, pOutput->info.precision, &tsVal,
+                     NULL, NULL);
+        if (cvtCode != TSDB_CODE_SUCCESS) {
+          retCode = cvtCode;
+          break;
+        }
+        retCode = colDataSetVal(pOutput, pos, (const char*)&tsVal, false);
+        break;
+      }
+
+      int64_t v = 0;
+      GET_TYPED_DATA(v, int64_t, pDefault->nType, &pDefault->i, inputTypeMod);
+      retCode = colDataSetVal(pOutput, pos, (const char*)&v, false);
+      break;
+    }
+    case TSDB_DATA_TYPE_UBIGINT: {
+      uint64_t v = 0;
+      GET_TYPED_DATA(v, uint64_t, pDefault->nType, &pDefault->i, inputTypeMod);
+      retCode = colDataSetVal(pOutput, pos, (const char*)&v, false);
+      break;
+    }
+    case TSDB_DATA_TYPE_FLOAT: {
+      float v = 0;
+      GET_TYPED_DATA(v, float, pDefault->nType, &pDefault->i, inputTypeMod);
+      retCode = colDataSetVal(pOutput, pos, (const char*)&v, false);
+      break;
+    }
+    case TSDB_DATA_TYPE_DOUBLE: {
+      double v = 0;
+      GET_TYPED_DATA(v, double, pDefault->nType, &pDefault->i, inputTypeMod);
+      retCode = colDataSetVal(pOutput, pos, (const char*)&v, false);
+      break;
+    }
+    case TSDB_DATA_TYPE_DECIMAL64: {
+      Decimal64 v = {0};
+      switch (pDefault->nType) {
+        case TSDB_DATA_TYPE_BOOL:
+          retCode = TEST_decimal64From_uint64_t(&v, pOutput->info.precision, pOutput->info.scale, (uint64_t)pDefault->i);
+          break;
+        case TSDB_DATA_TYPE_TINYINT:
+        case TSDB_DATA_TYPE_SMALLINT:
+        case TSDB_DATA_TYPE_INT:
+        case TSDB_DATA_TYPE_BIGINT:
+        case TSDB_DATA_TYPE_TIMESTAMP:
+          retCode = TEST_decimal64From_int64_t(&v, pOutput->info.precision, pOutput->info.scale, pDefault->i);
+          break;
+        case TSDB_DATA_TYPE_UTINYINT:
+        case TSDB_DATA_TYPE_USMALLINT:
+        case TSDB_DATA_TYPE_UINT:
+        case TSDB_DATA_TYPE_UBIGINT:
+          retCode = TEST_decimal64From_uint64_t(&v, pOutput->info.precision, pOutput->info.scale, pDefault->u);
+          break;
+        case TSDB_DATA_TYPE_FLOAT:
+          retCode = TEST_decimal64From_double(&v, pOutput->info.precision, pOutput->info.scale, pDefault->f);
+          break;
+        case TSDB_DATA_TYPE_DOUBLE:
+          retCode = TEST_decimal64From_double(&v, pOutput->info.precision, pOutput->info.scale, pDefault->d);
+          break;
+        case TSDB_DATA_TYPE_DECIMAL64: {
+          uint8_t inputPrecision = 0, inputScale = 0;
+          extractTypeFromTypeMod(pDefault->nType, inputTypeMod, &inputPrecision, &inputScale, NULL);
+          retCode = TEST_decimal64FromDecimal64((Decimal64*)&pDefault->i, inputPrecision, inputScale, &v,
+                                                pOutput->info.precision, pOutput->info.scale);
+          break;
+        }
+        case TSDB_DATA_TYPE_DECIMAL: {
+          uint8_t inputPrecision = 0, inputScale = 0;
+          extractTypeFromTypeMod(pDefault->nType, inputTypeMod, &inputPrecision, &inputScale, NULL);
+          retCode = TEST_decimal64FromDecimal128((Decimal128*)pDefault->pz, inputPrecision, inputScale, &v,
+                                                 pOutput->info.precision, pOutput->info.scale);
+          break;
+        }
+        default:
+          retCode = TSDB_CODE_OPS_NOT_SUPPORT;
+          break;
+      }
+
+      if (retCode == TSDB_CODE_SUCCESS) {
+        retCode = colDataSetVal(pOutput, pos, (const char*)&v, false);
+      }
+      break;
+    }
+    case TSDB_DATA_TYPE_DECIMAL: {
+      Decimal128 v = {0};
+      switch (pDefault->nType) {
+        case TSDB_DATA_TYPE_BOOL:
+          retCode =
+              TEST_decimal128From_uint64_t(&v, pOutput->info.precision, pOutput->info.scale, (uint64_t)pDefault->i);
+          break;
+        case TSDB_DATA_TYPE_TINYINT:
+        case TSDB_DATA_TYPE_SMALLINT:
+        case TSDB_DATA_TYPE_INT:
+        case TSDB_DATA_TYPE_BIGINT:
+        case TSDB_DATA_TYPE_TIMESTAMP:
+          retCode = TEST_decimal128From_int64_t(&v, pOutput->info.precision, pOutput->info.scale, pDefault->i);
+          break;
+        case TSDB_DATA_TYPE_UTINYINT:
+        case TSDB_DATA_TYPE_USMALLINT:
+        case TSDB_DATA_TYPE_UINT:
+        case TSDB_DATA_TYPE_UBIGINT:
+          retCode = TEST_decimal128From_uint64_t(&v, pOutput->info.precision, pOutput->info.scale, pDefault->u);
+          break;
+        case TSDB_DATA_TYPE_FLOAT:
+          retCode = TEST_decimal128From_double(&v, pOutput->info.precision, pOutput->info.scale, pDefault->f);
+          break;
+        case TSDB_DATA_TYPE_DOUBLE:
+          retCode = TEST_decimal128From_double(&v, pOutput->info.precision, pOutput->info.scale, pDefault->d);
+          break;
+        case TSDB_DATA_TYPE_DECIMAL64: {
+          uint8_t inputPrecision = 0, inputScale = 0;
+          extractTypeFromTypeMod(pDefault->nType, inputTypeMod, &inputPrecision, &inputScale, NULL);
+          retCode = TEST_decimal128FromDecimal64((Decimal64*)&pDefault->i, inputPrecision, inputScale, &v,
+                                                 pOutput->info.precision, pOutput->info.scale);
+          break;
+        }
+        case TSDB_DATA_TYPE_DECIMAL: {
+          uint8_t inputPrecision = 0, inputScale = 0;
+          extractTypeFromTypeMod(pDefault->nType, inputTypeMod, &inputPrecision, &inputScale, NULL);
+          retCode = TEST_decimal128FromDecimal128((Decimal128*)pDefault->pz, inputPrecision, inputScale, &v,
+                                                  pOutput->info.precision, pOutput->info.scale);
+          break;
+        }
+        default:
+          retCode = TSDB_CODE_OPS_NOT_SUPPORT;
+          break;
+      }
+
+      if (retCode == TSDB_CODE_SUCCESS) {
+        retCode = colDataSetVal(pOutput, pos, (const char*)&v, false);
+      }
+      break;
+    }
+    case TSDB_DATA_TYPE_GEOMETRY:
+      if (pDefault->pz == NULL) {
+        colDataSetNULL(pOutput, pos);
+        retCode = TSDB_CODE_SUCCESS;
+        break;
+      }
+
+      if (pDefault->nType == TSDB_DATA_TYPE_GEOMETRY) {
+        retCode = colDataSetVal(pOutput, pos, pDefault->pz, false);
+        break;
+      }
+
+      if (IS_STR_DATA_TYPE(pDefault->nType)) {
+#ifdef USE_GEOS
+        size_t         len = 0;
+        unsigned char* geom = NULL;
+        char*          output = NULL;
+        char*          inputWkt = NULL;
+
+        retCode = initCtxGeomFromText();
+        if (retCode != TSDB_CODE_SUCCESS) {
+          break;
+        }
+
+        if (pDefault->nType == TSDB_DATA_TYPE_NCHAR) {
+          int32_t charLen = varDataLen(pDefault->pz);
+          inputWkt = taosMemoryCalloc(1, charLen + TSDB_NCHAR_SIZE);
+          if (inputWkt == NULL) {
+            retCode = terrno;
+            break;
+          }
+
+          int32_t cvtLen = taosUcs4ToMbs((TdUcs4*)varDataVal(pDefault->pz), charLen, inputWkt, NULL);
+          if (cvtLen < 0) {
+            taosMemoryFree(inputWkt);
+            retCode = TSDB_CODE_FAILED;
+            break;
+          }
+          inputWkt[cvtLen] = 0;
+        } else {
+          int32_t charLen = varDataLen(pDefault->pz);
+          inputWkt = taosMemoryCalloc(1, charLen + 1);
+          if (inputWkt == NULL) {
+            retCode = terrno;
+            break;
+          }
+          (void)memcpy(inputWkt, varDataVal(pDefault->pz), charLen);
+        }
+
+        retCode = doGeomFromText(inputWkt, &geom, &len);
+        taosMemoryFree(inputWkt);
+        if (retCode != TSDB_CODE_SUCCESS) {
+          break;
+        }
+
+        output = taosMemoryCalloc(1, len + VARSTR_HEADER_SIZE);
+        if (output == NULL) {
+          geosFreeBuffer(geom);
+          retCode = terrno;
+          break;
+        }
+
+        (void)memcpy(output + VARSTR_HEADER_SIZE, geom, len);
+        varDataSetLen(output, len);
+        geosFreeBuffer(geom);
+
+        retCode = colDataSetVal(pOutput, pos, output, false);
+        taosMemoryFree(output);
+        break;
+#else
+        retCode = TSDB_CODE_FUNC_FUNTION_PARA_TYPE;
+        break;
+#endif
+      }
+
+      retCode = TSDB_CODE_FUNC_FUNTION_PARA_TYPE;
+      break;
+    case TSDB_DATA_TYPE_VARCHAR:
+    case TSDB_DATA_TYPE_VARBINARY:
+    case TSDB_DATA_TYPE_NCHAR:
+    case TSDB_DATA_TYPE_BLOB:
+      if (pDefault->pz == NULL) {
+        colDataSetNULL(pOutput, pos);
+        retCode = TSDB_CODE_SUCCESS;
+        break;
+      }
+      retCode = colDataSetVal(pOutput, pos, pDefault->pz, false);
+      break;
+    default:
+      colDataSetNULL(pOutput, pos);
+      retCode = TSDB_CODE_SUCCESS;
+      break;
+  }
+
+  return retCode;
+}
+
+static int32_t cloneLagLeadRowValue(const SLagLeadRowValue* pSrc, SLagLeadRowValue* pDst) {
+  pDst->isDataNull = pSrc->isDataNull;
+  pDst->pData = NULL;
+  pDst->dataLen = pSrc->dataLen;
+  pDst->block = pSrc->block;
+  pDst->rowIndex = pSrc->rowIndex;
+
+  if (pSrc->isDataNull || pSrc->pData == NULL) {
+    return TSDB_CODE_SUCCESS;
+  }
+
+  int32_t dataLen = pSrc->dataLen;
+
+  if (dataLen <= 0) {
+    return TSDB_CODE_SUCCESS;
+  }
+
+  pDst->pData = taosMemoryMalloc(dataLen);
+  if (pDst->pData == NULL) {
+    return terrno;
+  }
+
+  (void)memcpy(pDst->pData, pSrc->pData, dataLen);
+  return TSDB_CODE_SUCCESS;
+}
+
+static int32_t setLagLeadOutputFromValue(SqlFunctionCtx* pCtx, int32_t pos, SLagLeadRowValue* pValue) {
+  if (pValue->isDataNull) {
+    colDataSetNULL((SColumnInfoData*)pCtx->pOutput, pos);
+    return TSDB_CODE_SUCCESS;
+  }
+
+  return colDataSetVal((SColumnInfoData*)pCtx->pOutput, pos, pValue->pData, false);
+}
+
+static int32_t resolveLeadPendingRows(SqlFunctionCtx* pCtx, SLagLeadState* pState, SArray* pCurrValues) {
+  if (pState->pLeadPending == NULL || taosArrayGetSize(pState->pLeadPending) == 0) {
+    return TSDB_CODE_SUCCESS;
+  }
+
+  int32_t code = TSDB_CODE_SUCCESS;
+  int32_t currSize = taosArrayGetSize(pCurrValues);
+  int32_t pendingSize = taosArrayGetSize(pState->pLeadPending);
+  SArray* pRemain = taosArrayInit(TMAX(pendingSize, 1), sizeof(SLeadPendingItem));
+  if (pRemain == NULL) {
+    return terrno;
+  }
+
+  for (int32_t i = 0; i < pendingSize; ++i) {
+    SLeadPendingItem* pItem = taosArrayGet(pState->pLeadPending, i);
+    if (pItem == NULL) {
+      code = terrno;
+      goto cleanup;
+    }
+
+    if (pItem->needIdx < currSize) {
+      SLagLeadRowValue* pTarget = taosArrayGet(pCurrValues, pItem->needIdx);
+      if (pTarget == NULL) {
+        code = terrno;
+        goto cleanup;
+      }
+
+      code = setLagLeadOutputFromValue(pCtx, pItem->outputPos, pTarget);
+      if (code != TSDB_CODE_SUCCESS) {
+        goto cleanup;
+      }
+    } else {
+      pItem->needIdx -= currSize;
+      if (NULL == taosArrayPush(pRemain, pItem)) {
+        code = terrno;
+        goto cleanup;
+      }
+    }
+  }
+
+  taosArrayDestroy(pState->pLeadPending);
+  pState->pLeadPending = pRemain;
+
+cleanup:
+  if (code != TSDB_CODE_SUCCESS) {
+    taosArrayDestroy(pRemain);
+  }
+
+  return code;
+}
+
+static int32_t refreshLagTailValues(SLagLeadState* pState, SArray* pCurrValues, int64_t offset) {
+  int32_t currSize = taosArrayGetSize(pCurrValues);
+  if (offset <= 0 || currSize <= 0) {
+    return TSDB_CODE_SUCCESS;
+  }
+
+  int32_t oldSize = (pState->pLagTail == NULL) ? 0 : taosArrayGetSize(pState->pLagTail);
+  int32_t keep = (int32_t)TMIN(offset, oldSize + currSize);
+
+  SArray* pNewTail = taosArrayInit(TMAX(keep, 1), sizeof(SLagLeadRowValue));
+  if (pNewTail == NULL) {
+    return terrno;
+  }
+
+  int32_t start = oldSize + currSize - keep;
+  for (int32_t idx = start; idx < oldSize + currSize; ++idx) {
+    SLagLeadRowValue* pSrc = NULL;
+    if (idx < oldSize) {
+      pSrc = taosArrayGet(pState->pLagTail, idx);
+    } else {
+      pSrc = taosArrayGet(pCurrValues, idx - oldSize);
+    }
+
+    if (pSrc == NULL) {
+      cleanupLagLeadRowValueArray(pNewTail);
+      return terrno;
+    }
+
+    SLagLeadRowValue newVal = {0};
+    int32_t code = cloneLagLeadRowValue(pSrc, &newVal);
+    if (code != TSDB_CODE_SUCCESS) {
+      cleanupLagLeadRowValueArray(pNewTail);
+      return code;
+    }
+
+    if (NULL == taosArrayPush(pNewTail, &newVal)) {
+      if (newVal.pData != NULL) {
+        taosMemoryFree(newVal.pData);
+      }
+      cleanupLagLeadRowValueArray(pNewTail);
+      return terrno;
+    }
+  }
+
+  if (pState->pLagTail != NULL) {
+    cleanupLagLeadRowValueArray(pState->pLagTail);
+  }
+  pState->pLagTail = pNewTail;
+  return TSDB_CODE_SUCCESS;
+}
+
+static int32_t lagLeadFunctionByRowImpl(SArray* pCtxArray, bool isLead) {
+  int32_t code = TSDB_CODE_SUCCESS;
+  int32_t colNum = pCtxArray->size;
+  if (colNum == 0) {
+    return TSDB_CODE_SUCCESS;
+  }
+
+  int32_t numOfElems = 0;
+  SArray* pRows = taosArrayInit_s(sizeof(SFuncInputRow), colNum);
+  if (NULL == pRows) {
+    return terrno;
+  }
+
+  SArray* pValueArrays = taosArrayInit(colNum, sizeof(SArray*));
+  if (NULL == pValueArrays) {
+    code = terrno;
+    goto _exit;
+  }
+
+  for (int32_t i = 0; i < colNum; ++i) {
+    SArray* pValues = taosArrayInit(32, sizeof(SLagLeadRowValue));
+    if (NULL == pValues) {
+      code = terrno;
+      goto _exit;
+    }
+
+    if (NULL == taosArrayPush(pValueArrays, &pValues)) {
+      cleanupLagLeadRowValueArray(pValues);
+      code = terrno;
+      goto _exit;
+    }
+  }
+
+  for (int32_t i = 0; i < colNum; ++i) {
+    SqlFunctionCtx* pCtx = *(SqlFunctionCtx**)taosArrayGet(pCtxArray, i);
+    if (NULL == pCtx) {
+      code = terrno;
+      goto _exit;
+    }
+    funcInputUpdate(pCtx);
+  }
+
+  SqlFunctionCtx* pCtx0 = *(SqlFunctionCtx**)taosArrayGet(pCtxArray, 0);
+  SFuncInputRow*  pRow0 = (SFuncInputRow*)taosArrayGet(pRows, 0);
+  if (NULL == pCtx0 || NULL == pRow0) {
+    code = terrno;
+    goto _exit;
+  }
+
+  int32_t startOffset = pCtx0->offset;
+  bool    result = false;
+  while (1) {
+    code = funcInputGetNextRow(pCtx0, pRow0, &result);
+    if (TSDB_CODE_SUCCESS != code) {
+      goto _exit;
+    }
+    if (!result) {
+      break;
+    }
+
+    {
+      SArray*          pValues0 = *(SArray**)taosArrayGet(pValueArrays, 0);
+      SLagLeadRowValue rowValue = {0};
+      code = copyLagLeadRowValue(pCtx0, pRow0, &rowValue);
+      if (code != TSDB_CODE_SUCCESS) {
+        goto _exit;
+      }
+
+      if (NULL == taosArrayPush(pValues0, &rowValue)) {
+        if (rowValue.pData != NULL) {
+          taosMemoryFree(rowValue.pData);
+        }
+        code = terrno;
+        goto _exit;
+      }
+    }
+
+    for (int32_t i = 1; i < colNum; ++i) {
+      SqlFunctionCtx* pCtx = *(SqlFunctionCtx**)taosArrayGet(pCtxArray, i);
+      SFuncInputRow*  pRow = (SFuncInputRow*)taosArrayGet(pRows, i);
+      if (NULL == pCtx || NULL == pRow) {
+        code = terrno;
+        goto _exit;
+      }
+
+      code = funcInputGetNextRow(pCtx, pRow, &result);
+      if (TSDB_CODE_SUCCESS != code) {
+        goto _exit;
+      }
+      if (!result) {
+        code = TSDB_CODE_QRY_EXECUTOR_INTERNAL_ERROR;
+        goto _exit;
+      }
+
+      SArray*          pValues = *(SArray**)taosArrayGet(pValueArrays, i);
+      SLagLeadRowValue rowValue = {0};
+      code = copyLagLeadRowValue(pCtx, pRow, &rowValue);
+      if (code != TSDB_CODE_SUCCESS) {
+        goto _exit;
+      }
+
+      if (NULL == taosArrayPush(pValues, &rowValue)) {
+        if (rowValue.pData != NULL) {
+          taosMemoryFree(rowValue.pData);
+        }
+        code = terrno;
+        goto _exit;
+      }
+    }
+
+    ++numOfElems;
+  }
+
+  for (int32_t i = 0; i < colNum; ++i) {
+    SqlFunctionCtx* pCtx = *(SqlFunctionCtx**)taosArrayGet(pCtxArray, i);
+    SArray*         pValues = *(SArray**)taosArrayGet(pValueArrays, i);
+    if (NULL == pCtx || NULL == pValues) {
+      code = terrno;
+      goto _exit;
+    }
+
+    SResultRowEntryInfo* pResInfo = GET_RES_INFO(pCtx);
+    SLagLeadState*       pState = GET_ROWCELL_INTERBUF(pResInfo);
+    if (pState == NULL) {
+      code = terrno;
+      goto _exit;
+    }
+
+    int64_t offset = pCtx->param[1].param.i;
+    if (offset <= 0) {
+      code = TSDB_CODE_QRY_EXECUTOR_INTERNAL_ERROR;
+      goto _exit;
+    }
+
+    if (isLead) {
+      if (pState->pLeadPending == NULL) {
+        pState->pLeadPending = taosArrayInit(8, sizeof(SLeadPendingItem));
+        if (pState->pLeadPending == NULL) {
+          code = terrno;
+          goto _exit;
+        }
+      }
+
+      code = resolveLeadPendingRows(pCtx, pState, pValues);
+      if (code != TSDB_CODE_SUCCESS) {
+        goto _exit;
+      }
+    }
+
+    for (int32_t rowIdx = 0; rowIdx < numOfElems; ++rowIdx) {
+      int32_t pos = startOffset + rowIdx;
+      SLagLeadRowValue* pCurRowValue = taosArrayGet(pValues, rowIdx);
+      if (pCurRowValue == NULL) {
+        code = terrno;
+        goto _exit;
+      }
+
+      if (isLead) {
+        int64_t targetIdx = (int64_t)rowIdx + offset;
+        if (targetIdx < numOfElems) {
+          SLagLeadRowValue* pTargetRowValue = taosArrayGet(pValues, targetIdx);
+          if (pTargetRowValue == NULL) {
+            code = terrno;
+            goto _exit;
+          }
+          code = setLagLeadOutputFromValue(pCtx, pos, pTargetRowValue);
+        } else {
+          code = setLagLeadDefaultValue(pCtx, pos);
+          if (code == TSDB_CODE_SUCCESS) {
+            SLeadPendingItem pending = {.outputPos = pos, .needIdx = targetIdx - numOfElems};
+            if (NULL == taosArrayPush(pState->pLeadPending, &pending)) {
+              code = terrno;
+            }
+          }
+        }
+      } else {
+        int64_t targetIdx = (int64_t)rowIdx - offset;
+        if (targetIdx >= 0) {
+          SLagLeadRowValue* pTargetRowValue = taosArrayGet(pValues, targetIdx);
+          if (pTargetRowValue == NULL) {
+            code = terrno;
+            goto _exit;
+          }
+          code = setLagLeadOutputFromValue(pCtx, pos, pTargetRowValue);
+        } else {
+          int32_t tailSize = (pState->pLagTail == NULL) ? 0 : taosArrayGetSize(pState->pLagTail);
+          int64_t tailIdx = tailSize + targetIdx;
+          if (tailIdx >= 0 && tailIdx < tailSize) {
+            SLagLeadRowValue* pTargetRowValue = taosArrayGet(pState->pLagTail, tailIdx);
+            if (pTargetRowValue == NULL) {
+              code = terrno;
+              goto _exit;
+            }
+            code = setLagLeadOutputFromValue(pCtx, pos, pTargetRowValue);
+          } else {
+            code = setLagLeadDefaultValue(pCtx, pos);
+          }
+        }
+      }
+
+      if (code != TSDB_CODE_SUCCESS) {
+        goto _exit;
+      }
+
+      if (pCtx->subsidiaries.num > 0) {
+        code = appendSelectivityCols(pCtx, pCurRowValue->block, pCurRowValue->rowIndex, pos);
+        if (code != TSDB_CODE_SUCCESS) {
+          goto _exit;
+        }
+      }
+    }
+
+    if (!isLead) {
+      code = refreshLagTailValues(pState, pValues, offset);
+      if (code != TSDB_CODE_SUCCESS) {
+        goto _exit;
+      }
+    }
+  }
+
+_exit:
+  for (int32_t i = 0; i < colNum; ++i) {
+    SqlFunctionCtx* pCtx = *(SqlFunctionCtx**)taosArrayGet(pCtxArray, i);
+    if (!pCtx) {
+      break;
+    }
+
+    if (!code) {
+      SResultRowEntryInfo* pResInfo = GET_RES_INFO(pCtx);
+      pResInfo->numOfRes = numOfElems;
+    }
+  }
+
+  if (pRows) {
+    taosArrayDestroy(pRows);
+    pRows = NULL;
+  }
+
+  cleanupLagLeadValueArrays(pValueArrays);
+
+  return code;
+}
+
+int32_t lagFunctionByRow(SArray* pCtxArray) {
+  return lagLeadFunctionByRowImpl(pCtxArray, false);
+}
+
+bool getLeadFuncEnv(SFunctionNode* UNUSED_PARAM(pFunc), SFuncExecEnv* pEnv) {
+  pEnv->calcMemSize = sizeof(SLagLeadState);
+  return true;
+}
+
+int32_t leadFunctionSetup(SqlFunctionCtx* pCtx, SResultRowEntryInfo* pResInfo) {
+  if (pResInfo->initialized) {
+    return TSDB_CODE_SUCCESS;
+  }
+  if (TSDB_CODE_SUCCESS != functionSetup(pCtx, pResInfo)) {
+    return TSDB_CODE_FUNC_SETUP_ERROR;
+  }
+
+  SLagLeadState* pState = GET_ROWCELL_INTERBUF(pResInfo);
+  if (pState != NULL) {
+    pState->pLagTail = NULL;
+    pState->pLeadPending = NULL;
+  }
+
+  return TSDB_CODE_SUCCESS;
+}
+
+int32_t leadFunction(SqlFunctionCtx* UNUSED_PARAM(pCtx)) { return TSDB_CODE_SUCCESS; }
+
+int32_t leadFunctionByRow(SArray* pCtxArray) {
+  return lagLeadFunctionByRowImpl(pCtxArray, true);
+}
+
+void lagLeadFunctionCleanupExt(SqlFunctionCtx* pCtx) {
+  if (pCtx == NULL || pCtx->resultInfo == NULL) {
+    return;
+  }
+
+  SLagLeadState* pState = GET_ROWCELL_INTERBUF(pCtx->resultInfo);
+  if (pState == NULL) {
+    return;
+  }
+
+  if (pState->pLagTail != NULL) {
+    cleanupLagLeadRowValueArray(pState->pLagTail);
+    pState->pLagTail = NULL;
+  }
+
+  if (pState->pLeadPending != NULL) {
+    taosArrayDestroy(pState->pLeadPending);
+    pState->pLeadPending = NULL;
+  }
+}
+
+bool getFillforwardFuncEnv(SFunctionNode* UNUSED_PARAM(pFunc), SFuncExecEnv* pEnv) {
+  pEnv->calcMemSize = sizeof(SFillforwardInfo);
+  return true;
+}
+
+int32_t fillforwardFunctionSetup(SqlFunctionCtx* pCtx, SResultRowEntryInfo* pResInfo) {
+  if (pResInfo->initialized) {
+    return TSDB_CODE_SUCCESS;
+  }
+  if (TSDB_CODE_SUCCESS != functionSetup(pCtx, pResInfo)) {
+    return TSDB_CODE_FUNC_SETUP_ERROR;
+  }
+  SFillforwardInfo* pFillforwardInfo = GET_ROWCELL_INTERBUF(pResInfo);
+  pFillforwardInfo->nonnull = false;
+
+  return TSDB_CODE_SUCCESS;
+}
+
+int32_t fillforwardFunction(SqlFunctionCtx* pCtx) { return TSDB_CODE_SUCCESS; }
+
+static int32_t doHandleFillforward(SFillforwardInfo* pFillforwardInfo, int32_t type, SColumnInfoData* pOutput, int32_t pos) {
+  if (!pFillforwardInfo->nonnull) {
+    colDataSetNULL(pOutput, pos);
+
+    return TSDB_CODE_SUCCESS;
+  }
+
+  switch (type) {
+    case TSDB_DATA_TYPE_BOOL:
+    case TSDB_DATA_TYPE_UTINYINT:
+    case TSDB_DATA_TYPE_TINYINT:
+    case TSDB_DATA_TYPE_USMALLINT:
+    case TSDB_DATA_TYPE_SMALLINT:
+    case TSDB_DATA_TYPE_UINT:
+    case TSDB_DATA_TYPE_INT:
+    case TSDB_DATA_TYPE_UBIGINT:
+    case TSDB_DATA_TYPE_BIGINT:
+    case TSDB_DATA_TYPE_TIMESTAMP:
+      colDataSetInt64(pOutput, pos, &pFillforwardInfo->v);
+      break;
+    case TSDB_DATA_TYPE_FLOAT:
+      colDataSetFloat(pOutput, pos, &pFillforwardInfo->fv);
+      break;
+    case TSDB_DATA_TYPE_DOUBLE:
+      colDataSetDouble(pOutput, pos, &pFillforwardInfo->dv);
+      break;
+    case TSDB_DATA_TYPE_DECIMAL64:
+      return colDataSetVal(pOutput, pos, (const char*)&pFillforwardInfo->v, false);
+    case TSDB_DATA_TYPE_DECIMAL:
+      return colDataSetVal(pOutput, pos, (void*)pFillforwardInfo->dec, false);
+    case TSDB_DATA_TYPE_VARCHAR:
+    case TSDB_DATA_TYPE_VARBINARY:
+    case TSDB_DATA_TYPE_NCHAR:
+      return colDataSetVal(pOutput, pos, (void*)pFillforwardInfo->str, false);
+    default:
+      return TSDB_CODE_FUNC_FUNTION_PARA_TYPE;
+  }
+
+  return TSDB_CODE_SUCCESS;
+}
+
+static int32_t setFillforwardResult(SqlFunctionCtx* pCtx, SFuncInputRow* pRow, int32_t pos) {
+  SResultRowEntryInfo* pResInfo = GET_RES_INFO(pCtx);
+  SFillforwardInfo*            pFillforwardInfo = GET_ROWCELL_INTERBUF(pResInfo);
+
+  SInputColumnInfoData* pInput = &pCtx->input;
+  SColumnInfoData*      pInputCol = pInput->pData[0];
+  int8_t                inputType = pInputCol->info.type;
+  SColumnInfoData*      pOutput = (SColumnInfoData*)pCtx->pOutput;
+  int32_t               code = TSDB_CODE_SUCCESS;
+
+  code = doHandleFillforward(pFillforwardInfo, inputType, pOutput, pos);
+  if (code != TSDB_CODE_SUCCESS) {
+    return code;
+  }
+
+  // handle selectivity
+  if (pCtx->subsidiaries.num > 0) {
+    code = appendSelectivityCols(pCtx, pRow->block, pRow->rowIndex, pos);
+    if (code != TSDB_CODE_SUCCESS) {
+      return code;
+    }
+  }
+
+  return TSDB_CODE_SUCCESS;
+}
+
+int32_t fillforwardFunctionByRow(SArray* pCtxArray) {
+  int32_t code = TSDB_CODE_SUCCESS;
+  int     fillforwardColNum = pCtxArray->size;
+  if (fillforwardColNum == 0) {
+    return TSDB_CODE_SUCCESS;
+  }
+  int32_t numOfElems = 0;
+
+  SArray* pRows = taosArrayInit_s(sizeof(SFuncInputRow), fillforwardColNum);
+  if (NULL == pRows) {
+    return terrno;
+  }
+
+  for (int i = 0; i < fillforwardColNum; ++i) {
+    SqlFunctionCtx* pCtx = *(SqlFunctionCtx**)taosArrayGet(pCtxArray, i);
+    if (NULL == pCtx) {
+      code = terrno;
+      goto _exit;
+    }
+    funcInputUpdate(pCtx);
+  }
+
+  SqlFunctionCtx* pCtx0 = *(SqlFunctionCtx**)taosArrayGet(pCtxArray, 0);
+  SFuncInputRow*  pRow0 = (SFuncInputRow*)taosArrayGet(pRows, 0);
+  if (NULL == pCtx0 || NULL == pRow0) {
+    code = terrno;
+    goto _exit;
+  }
+  int32_t startOffset = pCtx0->offset;
+  bool    result = false;
+  while (1) {
+    code = funcInputGetNextRow(pCtx0, pRow0, &result);
+    if (TSDB_CODE_SUCCESS != code) {
+      goto _exit;
+    }
+    if (!result) {
+      break;
+    }
+
+    for (int i = 1; i < fillforwardColNum; ++i) {
+      SqlFunctionCtx* pCtx = *(SqlFunctionCtx**)taosArrayGet(pCtxArray, i);
+      SFuncInputRow*  pRow = (SFuncInputRow*)taosArrayGet(pRows, i);
+      if (NULL == pCtx || NULL == pRow) {
+        code = terrno;
+        goto _exit;
+      }
+      code = funcInputGetNextRow(pCtx, pRow, &result);
+      if (TSDB_CODE_SUCCESS != code) {
+        goto _exit;
+      }
+      if (!result) {
+        // rows are not equal
+        code = TSDB_CODE_QRY_EXECUTOR_INTERNAL_ERROR;
+        goto _exit;
+      }
+    }
+
+    int32_t pos = startOffset + numOfElems;
+
+    for (int i = 0; i < fillforwardColNum; ++i) {
+      SqlFunctionCtx* pCtx = *(SqlFunctionCtx**)taosArrayGet(pCtxArray, i);
+      SFuncInputRow*  pRow = (SFuncInputRow*)taosArrayGet(pRows, i);
+      if (NULL == pCtx || NULL == pRow) {
+        code = terrno;
+        goto _exit;
+      }
+
+      if (!colDataIsNull_s(pCtx->input.pData[0], pCtx->rowIter.rowIndex - 1)) {
+        SResultRowEntryInfo*  pResInfo = GET_RES_INFO(pCtx);
+        SFillforwardInfo*             pFillforwardInfo = GET_ROWCELL_INTERBUF(pResInfo);
+        SInputColumnInfoData* pInput = &pCtx->input;
+        SColumnInfoData*      pInputCol = pInput->pData[0];
+        int8_t                inputType = pInputCol->info.type;
+
+        char* pv = pRow->pData;
+        switch (inputType) {
+          case TSDB_DATA_TYPE_BOOL:
+            pFillforwardInfo->v = *(bool*)pv ? 1 : 0;
+            break;
+          case TSDB_DATA_TYPE_UTINYINT:
+          case TSDB_DATA_TYPE_TINYINT:
+            pFillforwardInfo->v = *(int8_t*)pv;
+            break;
+          case TSDB_DATA_TYPE_UINT:
+          case TSDB_DATA_TYPE_INT:
+            pFillforwardInfo->v = *(int32_t*)pv;
+            break;
+          case TSDB_DATA_TYPE_USMALLINT:
+          case TSDB_DATA_TYPE_SMALLINT:
+            pFillforwardInfo->v = *(int16_t*)pv;
+            break;
+          case TSDB_DATA_TYPE_TIMESTAMP:
+          case TSDB_DATA_TYPE_UBIGINT:
+          case TSDB_DATA_TYPE_BIGINT:
+            pFillforwardInfo->v = *(int64_t*)pv;
+            break;
+          case TSDB_DATA_TYPE_FLOAT:
+            pFillforwardInfo->fv = *(float*)pv;
+            break;
+          case TSDB_DATA_TYPE_DOUBLE:
+            pFillforwardInfo->dv = *(double*)pv;
+            break;
+          case TSDB_DATA_TYPE_DECIMAL64:
+            DECIMAL64_SET_VALUE((Decimal64*)&pFillforwardInfo->v, *(int64_t*)pv);
+            break;
+          case TSDB_DATA_TYPE_DECIMAL:
+            DECIMAL128_CLONE((Decimal128*)pFillforwardInfo->dec, (Decimal128*)pv);
+            break;
+          case TSDB_DATA_TYPE_VARCHAR:
+          case TSDB_DATA_TYPE_VARBINARY:
+          case TSDB_DATA_TYPE_NCHAR: {
+            if (!pFillforwardInfo->nonnull) {
+              pFillforwardInfo->str = taosMemoryMalloc(pInputCol->info.bytes);
+              if (!pFillforwardInfo->str) {
+                code = terrno;
+                goto _exit;
+              }
+            }
+
+            (void)memcpy(pFillforwardInfo->str, pv, varDataTLen(pv));
+          } break;
+          default: {
+            code = TSDB_CODE_FUNC_FUNTION_PARA_TYPE;
+            goto _exit;
+          }
+        }
+
+        if (!pFillforwardInfo->nonnull) {
+          pFillforwardInfo->nonnull = true;
+        }
+      }
+
+      code = setFillforwardResult(pCtx, pRow, pos);
+      if (code) {
+        goto _exit;
+      }
+    }
+
+    ++numOfElems;
+  }
+
+_exit:
+  for (int i = 0; i < fillforwardColNum; ++i) {
+    SqlFunctionCtx* pCtx = *(SqlFunctionCtx**)taosArrayGet(pCtxArray, i);
+    if (!pCtx) {
+      break;
+    }
+
+    SResultRowEntryInfo*  pResInfo = GET_RES_INFO(pCtx);
+    SFillforwardInfo*             pRes = GET_ROWCELL_INTERBUF(pResInfo);
+    SInputColumnInfoData* pInput = &pCtx->input;
+    SColumnInfoData*      pInputCol = pInput->pData[0];
+
+    if (IS_VAR_DATA_TYPE(pInputCol->info.type) && pRes->nonnull) {
+      taosMemoryFree(pRes->str);
+    }
+
+    if (!code) {
+      pResInfo->numOfRes = numOfElems;
+    }
+  }
+
+  if (pRows) {
+    taosArrayDestroy(pRows);
+    pRows = NULL;
+  }
+  return code;
+}
+
 int32_t getTopBotInfoSize(int64_t numOfItems) { return sizeof(STopBotRes) + numOfItems * sizeof(STopBotResItem); }
 
 bool getTopBotFuncEnv(SFunctionNode* pFunc, SFuncExecEnv* pEnv) {
@@ -3688,7 +4921,7 @@ int32_t topFunction(SqlFunctionCtx* pCtx) {
 
   int32_t start = pInput->startRowIndex;
   for (int32_t i = start; i < pInput->numOfRows + start; ++i) {
-    if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+    if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
       continue;
     }
 
@@ -3722,7 +4955,7 @@ int32_t bottomFunction(SqlFunctionCtx* pCtx) {
 
   int32_t start = pInput->startRowIndex;
   for (int32_t i = start; i < pInput->numOfRows + start; ++i) {
-    if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+    if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
       continue;
     }
 
@@ -3847,13 +5080,34 @@ int32_t doAddIntoResult(SqlFunctionCtx* pCtx, void* pData, int32_t rowIndex, SSD
   return TSDB_CODE_SUCCESS;
 }
 
+
+bool hasNullFunc(  SColumnInfoData *pData,   SColumnDataAgg *pAgg, int32_t startIdx, int64_t rows) {
+  if (NULL != pAgg) {
+    return pAgg->numOfNull > 0 ? true : false;
+  }
+
+  if (!pData->hasNull) {
+    return false;
+  }
+
+  int64_t endIdx = startIdx + rows;
+  for (int64_t i = startIdx; i < endIdx; ++i) {
+    if (colDataIsNull_s(pData, i)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
 /*
  * +------------------------------------+--------------+--------------+
  * |            null bitmap             |              |              |
  * |(n columns, one bit for each column)| src column #1| src column #2|
  * +------------------------------------+--------------+--------------+
  */
-int32_t serializeTupleData(const SSDataBlock* pSrcBlock, int32_t rowIndex, SSubsidiaryResInfo* pSubsidiaryies,
+int32_t serializeTupleData(SqlFunctionCtx* pCtx, const SSDataBlock* pSrcBlock, int32_t rowIndex, SSubsidiaryResInfo* pSubsidiaryies,
                            char* buf, char** res) {
   char* nullList = buf;
   char* pStart = (char*)(nullList + sizeof(bool) * pSubsidiaryies->num);
@@ -3868,26 +5122,30 @@ int32_t serializeTupleData(const SSDataBlock* pSrcBlock, int32_t rowIndex, SSubs
       continue;
     }
 
-    SFunctParam* pFuncParam = &pc->pExpr->base.pParam[0];
-    int32_t      srcSlotId = pFuncParam->pCol->slotId;
+    if (fmIsSelectValueFunc(pc->functionId)) {
+      SFunctParam* pFuncParam = &pc->pExpr->base.pParam[0];
+      int32_t      srcSlotId = pFuncParam->pCol->slotId;
 
-    SColumnInfoData* pCol = taosArrayGet(pSrcBlock->pDataBlock, srcSlotId);
-    if (NULL == pCol) {
-      return TSDB_CODE_OUT_OF_RANGE;
-    }
-    if ((nullList[i] = colDataIsNull_s(pCol, rowIndex)) == true) {
+      SColumnInfoData* pCol = taosArrayGet(pSrcBlock->pDataBlock, srcSlotId);
+      if (NULL == pCol) {
+        return TSDB_CODE_OUT_OF_RANGE;
+      }
+      if ((nullList[i] = colDataIsNull_s(pCol, rowIndex)) == true) {
+        offset += pCol->info.bytes;
+        continue;
+      }
+
+      char* p = colDataGetData(pCol, rowIndex);
+      if (IS_VAR_DATA_TYPE(pCol->info.type)) {
+        int32_t bytes = calcStrBytesByType(pCol->info.type, p);
+        (void)memcpy(pStart + offset, p, bytes);
+      } else {
+        (void)memcpy(pStart + offset, p, pCol->info.bytes);
+      }
+
       offset += pCol->info.bytes;
       continue;
     }
-
-    char* p = colDataGetData(pCol, rowIndex);
-    if (IS_VAR_DATA_TYPE(pCol->info.type)) {
-      (void)memcpy(pStart + offset, p, (pCol->info.type == TSDB_DATA_TYPE_JSON) ? getJsonValueLen(p) : varDataTLen(p));
-    } else {
-      (void)memcpy(pStart + offset, p, pCol->info.bytes);
-    }
-
-    offset += pCol->info.bytes;
   }
 
   *res = buf;
@@ -3959,7 +5217,7 @@ int32_t saveTupleData(SqlFunctionCtx* pCtx, int32_t rowIndex, const SSDataBlock*
   }
 
   char* buf = NULL;
-  code = serializeTupleData(pSrcBlock, rowIndex, &pCtx->subsidiaries, pCtx->subsidiaries.buf, &buf);
+  code = serializeTupleData(pCtx, pSrcBlock, rowIndex, &pCtx->subsidiaries, pCtx->subsidiaries.buf, &buf);
   if (TSDB_CODE_SUCCESS != code) {
     return code;
   }
@@ -3993,7 +5251,7 @@ int32_t updateTupleData(SqlFunctionCtx* pCtx, int32_t rowIndex, const SSDataBloc
   }
 
   char* buf = NULL;
-  code = serializeTupleData(pSrcBlock, rowIndex, &pCtx->subsidiaries, pCtx->subsidiaries.buf, &buf);
+  code = serializeTupleData(pCtx, pSrcBlock, rowIndex, &pCtx->subsidiaries, pCtx->subsidiaries.buf, &buf);
   if (TSDB_CODE_SUCCESS != code) {
     return code;
   }
@@ -4203,7 +5461,7 @@ int32_t spreadFunction(SqlFunctionCtx* pCtx) {
     int32_t start = pInput->startRowIndex;
     // check the valid data one by one
     for (int32_t i = start; i < pInput->numOfRows + start; ++i) {
-      if (colDataIsNull_f(pCol->nullbitmap, i)) {
+      if (colDataIsNull_f(pCol, i)) {
         continue;
       }
 
@@ -4474,9 +5732,8 @@ int32_t elapsedFunctionMerge(SqlFunctionCtx* pCtx) {
 
 int32_t elapsedFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
   SElapsedInfo* pInfo = GET_ROWCELL_INTERBUF(GET_RES_INFO(pCtx));
-  double        result = (double)pInfo->max - (double)pInfo->min;
-  result = (result >= 0) ? result : -result;
-  pInfo->result = result / pInfo->timeUnit;
+  double        result = (double)(pInfo->max - pInfo->min);
+  pInfo->result = fabs(result) / pInfo->timeUnit;
   return functionFinalize(pCtx, pBlock);
 }
 
@@ -4757,7 +6014,7 @@ static int32_t histogramFunctionImpl(SqlFunctionCtx* pCtx, bool isPartial) {
 
   int32_t numOfElems = 0;
   for (int32_t i = start; i < numOfRows + start; ++i) {
-    if (pCol->hasNull && colDataIsNull_f(pCol->nullbitmap, i)) {
+    if (pCol->hasNull && colDataIsNull_f(pCol, i)) {
       continue;
     }
 
@@ -4846,13 +6103,13 @@ int32_t histogramFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
     int32_t len;
     char    buf[512] = {0};
     if (!pInfo->normalized) {
-      len = tsnprintf(varDataVal(buf), sizeof(buf) - VARSTR_HEADER_SIZE,
-                      "{\"lower_bin\":%g, \"upper_bin\":%g, \"count\":%" PRId64 "}", pInfo->bins[i].lower,
-                      pInfo->bins[i].upper, pInfo->bins[i].count);
+      len = snprintf(varDataVal(buf), sizeof(buf) - VARSTR_HEADER_SIZE,
+                     "{\"lower_bin\":%g, \"upper_bin\":%g, \"count\":%" PRId64 "}", pInfo->bins[i].lower,
+                     pInfo->bins[i].upper, pInfo->bins[i].count);
     } else {
-      len = tsnprintf(varDataVal(buf), sizeof(buf) - VARSTR_HEADER_SIZE,
-                      "{\"lower_bin\":%g, \"upper_bin\":%g, \"count\":%lf}", pInfo->bins[i].lower, pInfo->bins[i].upper,
-                      pInfo->bins[i].percentage);
+      len = snprintf(varDataVal(buf), sizeof(buf) - VARSTR_HEADER_SIZE,
+                     "{\"lower_bin\":%g, \"upper_bin\":%g, \"count\":%lf}", pInfo->bins[i].lower, pInfo->bins[i].upper,
+                     pInfo->bins[i].percentage);
     }
     varDataSetLen(buf, len);
     code = colDataSetVal(pCol, currentRow, buf, false);
@@ -5020,8 +6277,13 @@ int32_t hllFunction(SqlFunctionCtx* pCtx) {
 
     char* data = colDataGetData(pCol, i);
     if (IS_VAR_DATA_TYPE(type)) {
-      bytes = varDataLen(data);
-      data = varDataVal(data);
+      if (IS_STR_DATA_BLOB(type)) {
+        bytes = blobDataLen(data);
+        data = blobDataVal(data);
+      } else {
+        bytes = varDataLen(data);
+        data = varDataVal(data);
+      }
     }
 
     int32_t index = 0;
@@ -5252,7 +6514,7 @@ int32_t stateCountFunction(SqlFunctionCtx* pCtx) {
     pInfo->isPrevTsSet = true;
     numOfElems++;
 
-    if (colDataIsNull_f(pInputCol->nullbitmap, i)) {
+    if (colDataIsNull_f(pInputCol, i)) {
       colDataSetNULL(pOutput, i);
       // handle selectivity
       if (pCtx->subsidiaries.num > 0) {
@@ -5324,7 +6586,7 @@ int32_t stateDurationFunction(SqlFunctionCtx* pCtx) {
     pInfo->isPrevTsSet = true;
     numOfElems++;
 
-    if (colDataIsNull_f(pInputCol->nullbitmap, i)) {
+    if (colDataIsNull_f(pInputCol, i)) {
       colDataSetNULL(pOutput, i);
       // handle selectivity
       if (pCtx->subsidiaries.num > 0) {
@@ -5394,7 +6656,7 @@ int32_t csumFunction(SqlFunctionCtx* pCtx) {
     pSumRes->isPrevTsSet = true;
 
     int32_t pos = startOffset + numOfElems;
-    if (colDataIsNull_f(pInputCol->nullbitmap, i)) {
+    if (colDataIsNull_f(pInputCol, i)) {
       // colDataSetNULL(pOutput, i);
       continue;
     }
@@ -5497,7 +6759,7 @@ int32_t mavgFunction(SqlFunctionCtx* pCtx) {
     pInfo->isPrevTsSet = true;
 
     int32_t pos = startOffset + numOfElems;
-    if (colDataIsNull_f(pInputCol->nullbitmap, i)) {
+    if (colDataIsNull_f(pInputCol, i)) {
       // colDataSetNULL(pOutput, i);
       continue;
     }
@@ -5608,7 +6870,7 @@ static int32_t doReservoirSample(SqlFunctionCtx* pCtx, SSampleInfo* pInfo, char*
     }
     pInfo->numSampled++;
   } else {
-    int32_t j = taosRand() % (pInfo->totalPoints);
+    int32_t j = (int32_t)(taosRand() % (uint64_t)pInfo->totalPoints);
     if (j < pInfo->samples) {
       sampleAssignResult(pInfo, data, j);
       if (pCtx->subsidiaries.num > 0) {
@@ -5727,7 +6989,6 @@ int32_t tailFunctionSetup(SqlFunctionCtx* pCtx, SResultRowEntryInfo* pResultInfo
     pInfo->pItems[i]->isNull = false;
   }
 #endif
-
   return TSDB_CODE_SUCCESS;
 }
 
@@ -5979,6 +7240,8 @@ static int32_t saveModeTupleData(SqlFunctionCtx* pCtx, char* data, SModeInfo* pI
   if (IS_VAR_DATA_TYPE(pInfo->colType)) {
     if (pInfo->colType == TSDB_DATA_TYPE_JSON) {
       (void)memcpy(pInfo->buf, data, getJsonValueLen(data));
+    } else if (IS_STR_DATA_BLOB(pInfo->colType)) {
+      (void)memcpy(pInfo->buf, data, blobDataTLen(data));
     } else {
       (void)memcpy(pInfo->buf, data, varDataTLen(data));
     }
@@ -5993,11 +7256,7 @@ static int32_t doModeAdd(SModeInfo* pInfo, int32_t rowIndex, SqlFunctionCtx* pCt
   int32_t code = TSDB_CODE_SUCCESS;
   int32_t hashKeyBytes;
   if (IS_VAR_DATA_TYPE(pInfo->colType)) {
-    if (pInfo->colType == TSDB_DATA_TYPE_JSON) {
-      hashKeyBytes = getJsonValueLen(data);
-    } else {
-      hashKeyBytes = varDataTLen(data);
-    }
+    hashKeyBytes = calcStrBytesByType(pInfo->colType, data);
   } else {
     hashKeyBytes = pInfo->colBytes;
   }
@@ -6492,9 +7751,9 @@ int32_t blockDistFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
     compRatio = pData->totalSize * 100 / (double)totalRawSize;
   }
 
-  int32_t len = tsnprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE,
-                          "Total_Blocks=[%d] Total_Size=[%.2f KiB] Average_size=[%.2f KiB] Compression_Ratio=[%.2f %c]",
-                          pData->numOfBlocks, pData->totalSize / 1024.0, averageSize / 1024.0, compRatio, '%');
+  int32_t len = snprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE,
+                         "Total_Blocks=[%d] Total_Size=[%.2f KiB] Average_size=[%.2f KiB] Compression_Ratio=[%.2f %c]",
+                         pData->numOfBlocks, pData->totalSize / 1024.0, averageSize / 1024.0, compRatio, '%');
 
   varDataSetLen(st, len);
   int32_t code = colDataSetVal(pColInfo, row++, st, false);
@@ -6507,26 +7766,26 @@ int32_t blockDistFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
     avgRows = pData->totalRows / pData->numOfBlocks;
   }
 
-  len = tsnprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE,
-                  "Block_Rows=[%" PRId64 "] MinRows=[%d] MaxRows=[%d] AvgRows=[%" PRId64 "]", pData->totalRows,
-                  pData->minRows, pData->maxRows, avgRows);
+  len = snprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE,
+                 "Block_Rows=[%" PRId64 "] MinRows=[%d] MaxRows=[%d] AvgRows=[%" PRId64 "]", pData->totalRows,
+                 pData->minRows, pData->maxRows, avgRows);
   varDataSetLen(st, len);
   code = colDataSetVal(pColInfo, row++, st, false);
   if (TSDB_CODE_SUCCESS != code) {
     return code;
   }
 
-  len = tsnprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE, "Inmem_Rows=[%u] Stt_Rows=[%u] ",
-                  pData->numOfInmemRows, pData->numOfSttRows);
+  len = snprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE, "Inmem_Rows=[%u] Stt_Rows=[%u] ",
+                 pData->numOfInmemRows, pData->numOfSttRows);
   varDataSetLen(st, len);
   code = colDataSetVal(pColInfo, row++, st, false);
   if (TSDB_CODE_SUCCESS != code) {
     return code;
   }
 
-  len = tsnprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE,
-                  "Total_Tables=[%d] Total_Filesets=[%d] Total_Vgroups=[%d]", pData->numOfTables, pData->numOfFiles,
-                  pData->numOfVgroups);
+  len = snprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE,
+                 "Total_Tables=[%d] Total_Filesets=[%d] Total_Vgroups=[%d]", pData->numOfTables, pData->numOfFiles,
+                 pData->numOfVgroups);
 
   varDataSetLen(st, len);
   code = colDataSetVal(pColInfo, row++, st, false);
@@ -6534,8 +7793,8 @@ int32_t blockDistFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
     return code;
   }
 
-  len = tsnprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE,
-                  "--------------------------------------------------------------------------------");
+  len = snprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE,
+                 "--------------------------------------------------------------------------------");
   varDataSetLen(st, len);
   code = colDataSetVal(pColInfo, row++, st, false);
   if (TSDB_CODE_SUCCESS != code) {
@@ -6562,7 +7821,7 @@ int32_t blockDistFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
 
   for (int32_t i = 0; i < tListLen(pData->blockRowsHisto); ++i) {
     len =
-        tsnprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE, "%04d |", pData->defMinRows + bucketRange * (i + 1));
+        snprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE, "%04d |", pData->defMinRows + bucketRange * (i + 1));
 
     int32_t num = 0;
     if (pData->blockRowsHisto[i] > 0) {
@@ -6570,14 +7829,14 @@ int32_t blockDistFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
     }
 
     for (int32_t j = 0; j < num; ++j) {
-      int32_t x = tsnprintf(varDataVal(st) + len, sizeof(st) - VARSTR_HEADER_SIZE - len, "%c", '|');
+      int32_t x = snprintf(varDataVal(st) + len, sizeof(st) - VARSTR_HEADER_SIZE - len, "%c", '|');
       len += x;
     }
 
     if (pData->blockRowsHisto[i] > 0) {
       double v = pData->blockRowsHisto[i] * 100.0 / pData->numOfBlocks;
-      len += tsnprintf(varDataVal(st) + len, sizeof(st) - VARSTR_HEADER_SIZE - len, "  %d (%.2f%c)",
-                       pData->blockRowsHisto[i], v, '%');
+      len += snprintf(varDataVal(st) + len, sizeof(st) - VARSTR_HEADER_SIZE - len, "  %d (%.2f%c)",
+                      pData->blockRowsHisto[i], v, '%');
     }
 
     varDataSetLen(st, len);
@@ -6689,7 +7948,7 @@ int32_t blockDBUsageFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
   }
 
   len =
-      tsnprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE, "Disk_occupied=[%" PRId64 "k]", pData->dataInDiskSize);
+      snprintf(varDataVal(st), sizeof(st) - VARSTR_HEADER_SIZE, "Disk_occupied=[%" PRId64 "k]", pData->dataInDiskSize);
   varDataSetLen(st, len);
   code = colDataSetVal(pColInfo, row++, st, false);
   if (TSDB_CODE_SUCCESS != code) {
@@ -6720,7 +7979,9 @@ int32_t derivativeFuncSetup(SqlFunctionCtx* pCtx, SResultRowEntryInfo* pResInfo)
   return TSDB_CODE_SUCCESS;
 }
 
-int32_t derivativeFunction(SqlFunctionCtx* pCtx) {
+int32_t derivativeFunction(SqlFunctionCtx* pCtx) { return TSDB_CODE_SUCCESS; }
+
+static int32_t DoDerivativeFunction(SqlFunctionCtx* pCtx) {
   SResultRowEntryInfo* pResInfo = GET_RES_INFO(pCtx);
   SDerivInfo*          pDerivInfo = GET_ROWCELL_INTERBUF(pResInfo);
 
@@ -6853,6 +8114,17 @@ int32_t derivativeFunction(SqlFunctionCtx* pCtx) {
   return TSDB_CODE_SUCCESS;
 }
 
+int32_t derivativeFunctionByRow(SArray* pCtxArray) {
+  for (int32_t i = 0; i < taosArrayGetSize(pCtxArray); ++i) {
+    SqlFunctionCtx* pCtx = *(SqlFunctionCtx**)taosArrayGet(pCtxArray, i);
+    int32_t         code = DoDerivativeFunction(pCtx);
+    if (code != TSDB_CODE_SUCCESS) {
+      return code;
+    }
+  }
+  return TSDB_CODE_SUCCESS;
+}
+
 int32_t getIrateInfoSize(int32_t pkBytes) { return (int32_t)sizeof(SRateInfo) + 2 * pkBytes; }
 
 bool getIrateFuncEnv(struct SFunctionNode* pFunc, SFuncExecEnv* pEnv) {
@@ -6887,11 +8159,7 @@ static void doSaveRateInfo(SRateInfo* pRateInfo, bool isFirst, int64_t ts, char*
     if (pRateInfo->firstPk) {
       int32_t pkBytes;
       if (IS_VAR_DATA_TYPE(pRateInfo->pkType)) {
-        if (pRateInfo->pkType == TSDB_DATA_TYPE_JSON) {
-          pkBytes = getJsonValueLen(pk);
-        } else {
-          pkBytes = varDataTLen(pk);
-        }
+        pkBytes = calcStrBytesByType(pRateInfo->pkType, pk);
       } else {
         pkBytes = pRateInfo->pkBytes;
       }
@@ -6903,11 +8171,7 @@ static void doSaveRateInfo(SRateInfo* pRateInfo, bool isFirst, int64_t ts, char*
     if (pRateInfo->lastPk) {
       int32_t pkBytes;
       if (IS_VAR_DATA_TYPE(pRateInfo->pkType)) {
-        if (pRateInfo->pkType == TSDB_DATA_TYPE_JSON) {
-          pkBytes = getJsonValueLen(pk);
-        } else {
-          pkBytes = varDataTLen(pk);
-        }
+        pkBytes = calcStrBytesByType(pRateInfo->pkType, pk);
       } else {
         pkBytes = pRateInfo->pkBytes;
       }
@@ -7142,34 +8406,55 @@ int32_t irateFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
 int32_t groupConstValueFunction(SqlFunctionCtx* pCtx) {
   SResultRowEntryInfo* pResInfo = GET_RES_INFO(pCtx);
   SGroupKeyInfo*       pInfo = GET_ROWCELL_INTERBUF(pResInfo);
+  bool                 isWindow = pCtx->hasWindowOrGroup && pCtx->hasWindow;
 
+  if (pInfo->hasResult && (!isWindow || !pInfo->isNull)) {
+    // If already has result for 'group by' or
+    // has non-null result for 'window', we can skip left data blocks.
+    goto _group_value_over;
+  }
+
+  int32_t               valueRowIndex = -1;
   SInputColumnInfoData* pInput = &pCtx->input;
   SColumnInfoData*      pInputCol = pInput->pData[0];
 
-  int32_t startIndex = pInput->startRowIndex;
-
-  // escape rest of data blocks to avoid first entry to be overwritten.
-  if (pInfo->hasResult) {
-    goto _group_value_over;
+  // try to find a non-null value
+  if (NULL != pInputCol->pData) {
+    if (isWindow) {
+      // for 'window', non-null value can appear at any row of any data block
+      int64_t startIndex = pInput->startRowIndex;
+      int64_t endIndex = pInput->startRowIndex + pInput->numOfRows - 1;
+      for (int64_t i = startIndex; i <= endIndex; ++i) {
+        if (!colDataIsNull_s(pInputCol, i)) {
+          valueRowIndex = i;
+          break;
+        }
+      }
+    } else {
+      // for 'group by', just take the first row
+      if (!colDataIsNull_s(pInputCol, pInput->startRowIndex)) {
+        valueRowIndex = pInput->startRowIndex;
+      }
+    }
   }
 
-  if (pInputCol->pData == NULL || colDataIsNull_s(pInputCol, startIndex)) {
-    pInfo->isNull = true;
-    pInfo->hasResult = true;
-    goto _group_value_over;
-  }
-
-  char* data = colDataGetData(pInputCol, startIndex);
-  if (IS_VAR_DATA_TYPE(pInputCol->info.type)) {
-    (void)memcpy(pInfo->data, data,
-                 (pInputCol->info.type == TSDB_DATA_TYPE_JSON) ? getJsonValueLen(data) : varDataTLen(data));
+  if (valueRowIndex != -1) {
+    // found a non-null value
+    char* data = colDataGetData(pInputCol, valueRowIndex);
+    if (IS_VAR_DATA_TYPE(pInputCol->info.type)) {
+      int32_t bytes = calcStrBytesByType(pInputCol->info.type, data);
+      (void)memcpy(pInfo->data, data, bytes);
+    } else {
+      (void)memcpy(pInfo->data, data, pInputCol->info.bytes);
+    }
+    pInfo->isNull = false;
   } else {
-    (void)memcpy(pInfo->data, data, pInputCol->info.bytes);
+    // all values are null or first value is null for group by
+    pInfo->isNull = true;
   }
   pInfo->hasResult = true;
 
 _group_value_over:
-
   SET_VAL(pResInfo, 1, 1);
   return TSDB_CODE_SUCCESS;
 }
@@ -7224,9 +8509,8 @@ int32_t groupKeyCombine(SqlFunctionCtx* pDestCtx, SqlFunctionCtx* pSourceCtx) {
   }
 
   if (IS_VAR_DATA_TYPE(pSourceCtx->resDataInfo.type)) {
-    (void)memcpy(pDBuf->data, pSBuf->data,
-                 (pSourceCtx->resDataInfo.type == TSDB_DATA_TYPE_JSON) ? getJsonValueLen(pSBuf->data)
-                                                                       : varDataTLen(pSBuf->data));
+    int32_t bytes = calcStrBytesByType(pSourceCtx->resDataInfo.type, pSBuf->data);
+    (void)memcpy(pDBuf->data, pSBuf->data, bytes);
   } else {
     (void)memcpy(pDBuf->data, pSBuf->data, pSourceCtx->resDataInfo.bytes);
   }
@@ -7260,8 +8544,7 @@ int32_t cachedLastRowFunction(SqlFunctionCtx* pCtx) {
     pkCompareFn = getKeyComparFunc(pInfo->pkType, TSDB_ORDER_DESC);
   }
 
-  // TODO it traverse the different way.
-  // last_row function does not ignore the null value
+  // data is guaranteed to be in descending order
   for (int32_t i = pInput->numOfRows + pInput->startRowIndex - 1; i >= pInput->startRowIndex; --i) {
     numOfElems++;
 
@@ -7279,5 +8562,240 @@ int32_t cachedLastRowFunction(SqlFunctionCtx* pCtx) {
   }
 
   SET_VAL(pResInfo, numOfElems, 1);
+  return TSDB_CODE_SUCCESS;
+}
+
+bool getCorrFuncEnv(SFunctionNode* pFunc, SFuncExecEnv* pEnv) {
+  pEnv->calcMemSize = sizeof(SCorrRes);
+  return true;
+}
+
+int32_t corrFuncSetup(SqlFunctionCtx* pCtx, SResultRowEntryInfo* pResultInfo) {
+  if (pResultInfo->initialized) {
+    return TSDB_CODE_SUCCESS;
+  }
+  if (TSDB_CODE_SUCCESS != functionSetup(pCtx, pResultInfo)) {
+    return TSDB_CODE_FUNC_SETUP_ERROR;
+  }
+
+  SCorrRes* pRes = GET_ROWCELL_INTERBUF(pResultInfo);
+  (void)memset(pRes, 0, sizeof(SCorrRes));
+  return TSDB_CODE_SUCCESS;
+}
+
+int32_t corrFunction(SqlFunctionCtx* pCtx) {
+  int32_t               numOfElem = 0;
+  SInputColumnInfoData* pInput = &pCtx->input;
+  int32_t               xType = pInput->pData[0]->info.type;
+  int32_t               yType = pInput->pData[1]->info.type;
+  SCorrRes*             pCorrRes = GET_ROWCELL_INTERBUF(GET_RES_INFO(pCtx));
+
+  // computing based on the true data block
+  SColumnInfoData* pLeft = pInput->pData[0];   // left
+  SColumnInfoData* pRight = pInput->pData[1];  // right
+
+  int32_t leftMod = typeGetTypeModFromColInfo(&pLeft->info);
+  int32_t rightMod = typeGetTypeModFromColInfo(&pRight->info);
+  int32_t start = pInput->startRowIndex;
+  int32_t numOfRows = pInput->numOfRows;
+
+  if (IS_NULL_TYPE(xType) || IS_NULL_TYPE(yType)) {
+    numOfElem = 0;
+    goto _over;
+  }
+
+  for (int32_t i = 0; i < numOfRows; ++i) {
+    double pInputX = 0, pInputY = 0;
+
+    if (colDataIsNull_f(pLeft, i) || colDataIsNull_f(pRight, i)) {
+      continue;
+    }
+
+    char* pXVal = colDataGetData(pLeft, i);
+    char* pYVal = colDataGetData(pRight, i);
+
+    GET_TYPED_DATA(pInputX, double, xType, pXVal, leftMod);
+    GET_TYPED_DATA(pInputY, double, yType, pYVal, rightMod);
+
+    pCorrRes->sumLeft += pInputX;
+    pCorrRes->sumRight += pInputY;
+
+    pCorrRes->quadLeft += pInputX * pInputX;
+    pCorrRes->quadRight += pInputY * pInputY;
+
+    pCorrRes->productVal += pInputX * pInputY;
+
+    pCorrRes->count += 1;
+    numOfElem += 1;
+  }
+
+_over:
+  // data in the check operation are all null, not output
+  SET_VAL(GET_RES_INFO(pCtx), numOfElem, 1);
+  return TSDB_CODE_SUCCESS;
+}
+
+int32_t corrFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
+  SInputColumnInfoData* pInput = &pCtx->input;
+  SCorrRes*             pRes = GET_ROWCELL_INTERBUF(GET_RES_INFO(pCtx));
+  double                avg;
+
+  if (pRes->count == 0) {
+    GET_RES_INFO(pCtx)->numOfRes = 0;
+    return functionFinalize(pCtx, pBlock);
+  }
+
+  /**
+    numerator = sum_xy - (sum_x * sum_y) / n
+    denominator_x = math.sqrt(sum_x2 - (sum_x**2) / n)
+    denominator_y = math.sqrt(sum_y2 - (sum_y**2) / n)
+
+    if denominator_x == 0 or denominator_y == 0:
+        return 0.0
+    res = numerator / (denominator_x * denominator_y)
+  */
+
+  if (pRes->count == 1) {
+    pRes->result = 0.0;
+  } else {
+    double numerator = pRes->productVal - (pRes->sumLeft * pRes->sumRight) / pRes->count;
+    double dnmX = sqrt(pRes->quadLeft - pRes->sumLeft * pRes->sumLeft / pRes->count);
+    double dnmY = sqrt(pRes->quadRight - pRes->sumRight * pRes->sumRight / pRes->count);
+
+    if (DBL_EQUAL(dnmX, 0.0) || DBL_EQUAL(dnmY, 0.0)) {
+      pRes->result = 0.0;
+    } else {
+      pRes->result = numerator / (dnmX * dnmY);
+
+      if (pRes->result > 1 || pRes->result < -1) {
+        qError("invalid corr results, %.4f, numerator:%.4f, dnmX:%.4f, dnmY:%.4f", pRes->result, numerator, dnmX, dnmY);
+        if (pRes->result > 1) {
+          pRes->result = 1;
+        } else if (pRes->result < -1) {
+          pRes->result = -1;
+        }
+      }
+    }
+  }
+
+  return functionFinalize(pCtx, pBlock);
+}
+
+int32_t getCorrInfoSize() { return sizeof(SCorrRes); }
+
+int32_t corrPartialFinalize(SqlFunctionCtx* pCtx, SSDataBlock* pBlock) {
+  SResultRowEntryInfo* pResInfo = GET_RES_INFO(pCtx);
+  SStdRes*             pInfo = GET_ROWCELL_INTERBUF(GET_RES_INFO(pCtx));
+  int32_t              resultBytes = getCorrInfoSize();
+  char*                res = taosMemoryCalloc(resultBytes + VARSTR_HEADER_SIZE, sizeof(char));
+  int32_t              slotId = pCtx->pExpr->base.resSchema.slotId;
+  int32_t              code = 0;
+
+  if (NULL == res) {
+    return terrno;
+  }
+
+  (void)memcpy(varDataVal(res), pInfo, resultBytes);
+  varDataSetLen(res, resultBytes);
+
+  SColumnInfoData* pCol = taosArrayGet(pBlock->pDataBlock, slotId);
+  if (NULL == pCol) {
+    taosMemoryFree(res);
+    return TSDB_CODE_OUT_OF_RANGE;
+  }
+
+  code = colDataSetVal(pCol, pBlock->info.rows, res, false);
+
+  taosMemoryFree(res);
+  return code;
+}
+
+int32_t corrFuncMerge(SqlFunctionCtx* pCtx) {
+  SInputColumnInfoData* pInput = &pCtx->input;
+  SColumnInfoData*      pCol = pInput->pData[0];
+
+  if (IS_NULL_TYPE(pCol->info.type)) {
+    SET_VAL(GET_RES_INFO(pCtx), 0, 1);
+    return TSDB_CODE_SUCCESS;
+  }
+
+  if (pCol->info.type != TSDB_DATA_TYPE_BINARY) {
+    return TSDB_CODE_FUNC_FUNTION_PARA_TYPE;
+  }
+
+  SCorrRes* pInfo = GET_ROWCELL_INTERBUF(GET_RES_INFO(pCtx));
+
+  for (int32_t i = pInput->startRowIndex; i < pInput->startRowIndex + pInput->numOfRows; ++i) {
+    if (colDataIsNull_s(pCol, i)) {
+      continue;
+    }
+
+    char*     data = colDataGetData(pCol, i);
+    SCorrRes* pInputInfo = (SCorrRes*)varDataVal(data);
+
+    if (pInputInfo->count == 0) {
+      continue;
+    }
+
+    // pOutput->type = pInput->type;
+    if (pInfo->count == 0) {
+      TAOS_MEMCPY(pInfo, pInputInfo, sizeof(SCorrRes));
+    } else if (pInfo->count > 0) {
+      pInfo->productVal += pInputInfo->productVal;
+      pInfo->quadLeft += pInputInfo->quadLeft;
+      pInfo->quadRight += pInputInfo->quadRight;
+      pInfo->sumLeft += pInputInfo->sumLeft;
+      pInfo->sumRight += pInputInfo->sumRight;
+      pInfo->count += pInputInfo->count;
+    }
+  }
+
+  SET_VAL(GET_RES_INFO(pCtx), pInfo->count, 1);
+  return TSDB_CODE_SUCCESS;
+}
+
+int32_t hasNullFunction(SqlFunctionCtx* pCtx) {
+  SResultRowEntryInfo* pResInfo = GET_RES_INFO(pCtx);
+  bool* pRes = GET_ROWCELL_INTERBUF(pResInfo);
+  if (*pRes) {
+    return TSDB_CODE_SUCCESS;
+  }
+
+  SInputColumnInfoData* pInput = &pCtx->input;
+  SColumnDataAgg*       pAgg = pInput->pColumnDataAgg[0];
+  SColumnInfoData* pCol = pInput->pData[0];
+
+  if (pInput->numOfRows > 0) {
+    pResInfo->numOfRes = 1;
+  }
+
+  if (IS_NULL_TYPE(pCol->info.type) && pInput->numOfRows > 0) {
+    *pRes = true;
+    return TSDB_CODE_SUCCESS;
+  }
+
+  if (pInput->colDataSMAIsSet) {
+    if (pAgg->numOfNull > 0) {
+      *pRes = true;
+      return TSDB_CODE_SUCCESS;
+    }
+
+    if (pInput->numOfRows <= INT16_MAX) {
+      return TSDB_CODE_SUCCESS;
+    }
+  }
+
+  int32_t start = pInput->startRowIndex;
+  int32_t end = start + pInput->numOfRows;
+
+  if (pCol->hasNull) {
+    for (int32_t i = start; i < end; ++i) {
+      if (colDataIsNull_s(pCol, i)) {
+        *pRes = true;
+        break;
+      }
+    }
+  }  
+
   return TSDB_CODE_SUCCESS;
 }

@@ -58,20 +58,107 @@ typedef struct {
 #endif
 
 #include <objbase.h>
+#include <signal.h>
+#include <stdlib.h>
 
 #pragma warning(push)
 #pragma warning(disable : 4091)
 #include <DbgHelp.h>
 #pragma warning(pop)
 
+// Write a single stack frame line to hFile.
+// dbghelp functions are available via the statically-linked dbghelp.lib.
+static void taosWinWriteOneFrame(HANDLE hFile, HANDLE hProcess, DWORD64 pc, DWORD idx) {
+  char         symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+  PSYMBOL_INFO pSym = (PSYMBOL_INFO)symBuf;
+  pSym->SizeOfStruct = sizeof(SYMBOL_INFO);
+  pSym->MaxNameLen   = MAX_SYM_NAME;
+
+  DWORD64 symDisp = 0;
+  char   *symName = (char *)"<unknown>";
+  if (SymFromAddr(hProcess, pc, &symDisp, pSym)) {
+    symName = pSym->Name;
+  }
+
+  IMAGEHLP_LINE64 li = {0};
+  li.SizeOfStruct     = sizeof(IMAGEHLP_LINE64);
+  DWORD lineDisp      = 0;
+
+  char line[4096];
+  int  n;
+  if (SymGetLineFromAddr64(hProcess, pc, &lineDisp, &li)) {
+    n = _snprintf_s(line, sizeof(line), _TRUNCATE, "#%-3lu 0x%016I64X  %s  (%s:%lu)\r\n",
+                    (unsigned long)idx, pc, symName, li.FileName, (unsigned long)li.LineNumber);
+  } else {
+    n = _snprintf_s(line, sizeof(line), _TRUNCATE, "#%-3lu 0x%016I64X  %s\r\n",
+                    (unsigned long)idx, pc, symName);
+  }
+  DWORD w = 0;
+  if (n > 0) (void)WriteFile(hFile, line, (DWORD)n, &w, NULL);
+}
+
+// Walk the call stack from the exception context and write each frame to hFile.
+static void taosWinWriteStackTrace(HANDLE hFile, PEXCEPTION_POINTERS ep) {
+  HANDLE  hProcess = GetCurrentProcess();
+  HANDLE  hThread  = GetCurrentThread();
+  CONTEXT ctx      = *ep->ContextRecord; /* copy: StackWalk64 modifies it */
+
+  SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+  SymInitialize(hProcess, NULL, TRUE);
+
+  STACKFRAME64 sf   = {0};
+  DWORD        mach;
+#if defined(_M_X64)
+  mach                = IMAGE_FILE_MACHINE_AMD64;
+  sf.AddrPC.Offset    = ctx.Rip; sf.AddrPC.Mode    = AddrModeFlat;
+  sf.AddrFrame.Offset = ctx.Rbp; sf.AddrFrame.Mode = AddrModeFlat;
+  sf.AddrStack.Offset = ctx.Rsp; sf.AddrStack.Mode = AddrModeFlat;
+#elif defined(_M_IX86)
+  mach                = IMAGE_FILE_MACHINE_I386;
+  sf.AddrPC.Offset    = ctx.Eip; sf.AddrPC.Mode    = AddrModeFlat;
+  sf.AddrFrame.Offset = ctx.Ebp; sf.AddrFrame.Mode = AddrModeFlat;
+  sf.AddrStack.Offset = ctx.Esp; sf.AddrStack.Mode = AddrModeFlat;
+#elif defined(_M_ARM64)
+  mach                = IMAGE_FILE_MACHINE_ARM64;
+  sf.AddrPC.Offset    = ctx.Pc; sf.AddrPC.Mode    = AddrModeFlat;
+  sf.AddrFrame.Offset = ctx.Fp; sf.AddrFrame.Mode = AddrModeFlat;
+  sf.AddrStack.Offset = ctx.Sp; sf.AddrStack.Mode = AddrModeFlat;
+#else
+  SymCleanup(hProcess);
+  return; /* unsupported architecture */
+#endif
+
+  static const char hdr[] = "=== Stack Trace ===\r\n";
+  DWORD w = 0;
+  (void)WriteFile(hFile, hdr, (DWORD)(sizeof(hdr) - 1), &w, NULL);
+
+  for (DWORD i = 0; i < 128; i++) {
+    if (!StackWalk64(mach, hProcess, hThread, &sf, (PVOID)&ctx,
+                     NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL))
+      break;
+    if (sf.AddrPC.Offset == 0) break;
+    taosWinWriteOneFrame(hFile, hProcess, sf.AddrPC.Offset, i);
+  }
+  SymCleanup(hProcess);
+}
+
 LONG WINAPI FlCrashDump(PEXCEPTION_POINTERS ep) {
+  // Only handle fatal exceptions, let others pass through for vectored handler
+  DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+  // Skip non-fatal exceptions (like breakpoints during debugging)
+  if (code == EXCEPTION_BREAKPOINT || code == EXCEPTION_SINGLE_STEP) {
+    return EXCEPTION_CONTINUE_SEARCH;
+  }
+  
   typedef BOOL(WINAPI * FxMiniDumpWriteDump)(IN HANDLE hProcess, IN DWORD ProcessId, IN HANDLE hFile,
                                              IN MINIDUMP_TYPE                           DumpType,
                                              IN CONST PMINIDUMP_EXCEPTION_INFORMATION   ExceptionParam,
                                              IN CONST PMINIDUMP_USER_STREAM_INFORMATION UserStreamParam,
                                              IN CONST PMINIDUMP_CALLBACK_INFORMATION    CallbackParam);
 
-  HMODULE dll = LoadLibrary("dbghelp.dll");
+  // ── 1. load dbghelp ──────────────────────────────────────────────────────
+  HMODULE dll = LoadLibraryA("dbghelp.dll");
   if (dll == NULL) return EXCEPTION_CONTINUE_SEARCH;
   FxMiniDumpWriteDump mdwd = (FxMiniDumpWriteDump)(GetProcAddress(dll, "MiniDumpWriteDump"));
   if (mdwd == NULL) {
@@ -79,31 +166,176 @@ LONG WINAPI FlCrashDump(PEXCEPTION_POINTERS ep) {
     return EXCEPTION_CONTINUE_SEARCH;
   }
 
-  TCHAR path[MAX_PATH];
-  DWORD len = GetModuleFileName(NULL, path, _countof(path));
-  path[len - 3] = 'd';
-  path[len - 2] = 'm';
-  path[len - 1] = 'p';
+  // ── 2. build timestamped file paths next to the running executable ───────
+  //      Keeping dumps beside the exe makes them easy to find.
+  SYSTEMTIME st;
+  GetLocalTime(&st);
 
-  HANDLE file = CreateFile(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-  if (file == INVALID_HANDLE_VALUE) {
-    FreeLibrary(dll);
-    return EXCEPTION_CONTINUE_SEARCH;
+  TdWchar exePath[MAX_PATH];
+  DWORD   exeLen = GetModuleFileNameW(NULL, exePath, MAX_PATH);
+  /* strip the executable filename, keep the trailing backslash */
+  while (exeLen > 0 && exePath[exeLen - 1] != L'\\') exeLen--;
+  exePath[exeLen] = L'\0';  /* exePath is now the directory with trailing '\' */
+
+  TdWchar dmpPath[MAX_PATH];
+  TdWchar logPath[MAX_PATH];
+  _snwprintf_s(dmpPath, MAX_PATH, _TRUNCATE,
+               L"%staosd_%04d%02d%02d_%02d%02d%02d.dmp",
+               exePath, st.wYear, st.wMonth, st.wDay,
+               st.wHour, st.wMinute, st.wSecond);
+  _snwprintf_s(logPath, MAX_PATH, _TRUNCATE,
+               L"%staosd_%04d%02d%02d_%02d%02d%02d_stack.log",
+               exePath, st.wYear, st.wMonth, st.wDay,
+               st.wHour, st.wMinute, st.wSecond);
+
+  // ── 3. write MiniDump with comprehensive type ─────────────────────────────
+  HANDLE dmpFile = CreateFileW(dmpPath, GENERIC_WRITE, 0, NULL,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (dmpFile != INVALID_HANDLE_VALUE) {
+    MINIDUMP_EXCEPTION_INFORMATION mei;
+    mei.ThreadId          = GetCurrentThreadId();
+    mei.ExceptionPointers = ep;
+    mei.ClientPointers    = FALSE;
+
+    MINIDUMP_TYPE dumpType = (MINIDUMP_TYPE)(
+        MiniDumpWithDataSegs                    |  /* global/static variables     */
+        MiniDumpWithProcessThreadData           |  /* all thread stacks + locals  */
+        MiniDumpWithHandleData                  |  /* open handles                */
+        MiniDumpWithIndirectlyReferencedMemory  |  /* memory pointed-to by locals */
+        MiniDumpWithThreadInfo                  |  /* thread times, start addr    */
+        MiniDumpWithFullMemoryInfo);               /* all VMAs (flags/state)      */
+    // Keep process/thread data and indirectly referenced memory enabled
+    // to capture more complete diagnostic information in the minidump
+
+    (*mdwd)(GetCurrentProcess(), GetCurrentProcessId(), dmpFile,
+            dumpType, &mei, NULL, NULL);
+    CloseHandle(dmpFile);
   }
 
-  MINIDUMP_EXCEPTION_INFORMATION mei;
-  mei.ThreadId = GetCurrentThreadId();
-  mei.ExceptionPointers = ep;
-  mei.ClientPointers = FALSE;
+  // ── 4. write stack trace text log (usable without PDB on developer side) ──
+  HANDLE logFile = CreateFileW(logPath, GENERIC_WRITE, 0, NULL,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (logFile != INVALID_HANDLE_VALUE) {
+    char  hdr[512];
+    DWORD w = 0;
+    int   n = _snprintf_s(hdr, sizeof(hdr), _TRUNCATE,
+                          "ExceptionCode:    0x%08lX\r\n"
+                          "ExceptionAddress: 0x%016I64X\r\n"
+                          "ThreadId:         %lu\r\n"
+                          "\r\n",
+                          ep->ExceptionRecord->ExceptionCode,
+                          (DWORD64)(ULONG_PTR)ep->ExceptionRecord->ExceptionAddress,
+                          (unsigned long)GetCurrentThreadId());
+    if (n > 0) (void)WriteFile(logFile, hdr, (DWORD)n, &w, NULL);
+    taosWinWriteStackTrace(logFile, ep);
+    CloseHandle(logFile);
+  }
 
-  (*mdwd)(GetCurrentProcess(), GetCurrentProcessId(), file, MiniDumpWithHandleData, &mei, NULL, NULL);
-
-  CloseHandle(file);
   FreeLibrary(dll);
 
+  // Return EXCEPTION_EXECUTE_HANDLER to terminate the process after dump
+  return EXCEPTION_EXECUTE_HANDLER;
+}
+
+// Vectored Exception Handler - called BEFORE SEH, can catch heap corruption
+static LONG WINAPI FlVectoredExceptionHandler(PEXCEPTION_POINTERS ep) {
+  DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+  // Only handle critical exceptions that would terminate the process
+  // These exceptions may bypass SetUnhandledExceptionFilter in some cases
+  if (code == 0xC0000374 ||  // STATUS_HEAP_CORRUPTION
+      code == 0xC0000409 ||  // STATUS_STACK_BUFFER_OVERRUN (fast-fail)
+      code == 0xC00000FD) {  // STATUS_STACK_OVERFLOW
+    // Call FlCrashDump directly for these special exceptions
+    (void)FlCrashDump(ep);
+  }
+
+  // Let other exceptions pass to normal SEH handling
   return EXCEPTION_CONTINUE_SEARCH;
 }
-LONG WINAPI exceptionHandler(LPEXCEPTION_POINTERS exception);
+
+// Helper function to generate dump without exception context (for CRT handlers)
+static void FlCrashDumpNoException(const char* reason) {
+  typedef BOOL(WINAPI * FxMiniDumpWriteDump)(IN HANDLE hProcess, IN DWORD ProcessId, IN HANDLE hFile,
+                                             IN MINIDUMP_TYPE                           DumpType,
+                                             IN CONST PMINIDUMP_EXCEPTION_INFORMATION   ExceptionParam,
+                                             IN CONST PMINIDUMP_USER_STREAM_INFORMATION UserStreamParam,
+                                             IN CONST PMINIDUMP_CALLBACK_INFORMATION    CallbackParam);
+
+  HMODULE dll = LoadLibraryA("dbghelp.dll");
+  if (dll == NULL) return;
+  FxMiniDumpWriteDump mdwd = (FxMiniDumpWriteDump)(GetProcAddress(dll, "MiniDumpWriteDump"));
+  if (mdwd == NULL) {
+    FreeLibrary(dll);
+    return;
+  }
+
+  SYSTEMTIME st;
+  GetLocalTime(&st);
+
+  TdWchar exePath[MAX_PATH];
+  DWORD   exeLen = GetModuleFileNameW(NULL, exePath, MAX_PATH);
+  while (exeLen > 0 && exePath[exeLen - 1] != L'\\') exeLen--;
+  exePath[exeLen] = L'\0';
+
+  TdWchar dmpPath[MAX_PATH];
+  _snwprintf_s(dmpPath, MAX_PATH, _TRUNCATE,
+               L"%staosd_%04d%02d%02d_%02d%02d%02d.dmp",
+               exePath, st.wYear, st.wMonth, st.wDay,
+               st.wHour, st.wMinute, st.wSecond);
+
+  HANDLE dmpFile = CreateFileW(dmpPath, GENERIC_WRITE, 0, NULL,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (dmpFile != INVALID_HANDLE_VALUE) {
+    MINIDUMP_TYPE dumpType = (MINIDUMP_TYPE)(
+        MiniDumpWithDataSegs | MiniDumpWithProcessThreadData |
+        MiniDumpWithHandleData | MiniDumpWithThreadInfo | MiniDumpWithFullMemoryInfo);
+    (*mdwd)(GetCurrentProcess(), GetCurrentProcessId(), dmpFile,
+            dumpType, NULL, NULL, NULL);  // No exception info
+    CloseHandle(dmpFile);
+  }
+
+  // Write reason to log file
+  TdWchar logPath[MAX_PATH];
+  _snwprintf_s(logPath, MAX_PATH, _TRUNCATE,
+               L"%staosd_%04d%02d%02d_%02d%02d%02d_stack.log",
+               exePath, st.wYear, st.wMonth, st.wDay,
+               st.wHour, st.wMinute, st.wSecond);
+  HANDLE logFile = CreateFileW(logPath, GENERIC_WRITE, 0, NULL,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (logFile != INVALID_HANDLE_VALUE) {
+    char msg[512];
+    int n = _snprintf_s(msg, sizeof(msg), _TRUNCATE,
+                        "CRT/Runtime Error: %s\r\nThreadId: %lu\r\n",
+                        reason, (unsigned long)GetCurrentThreadId());
+    DWORD w = 0;
+    if (n > 0) WriteFile(logFile, msg, (DWORD)n, &w, NULL);
+    CloseHandle(logFile);
+  }
+
+  FreeLibrary(dll);
+}
+
+// CRT invalid parameter handler
+static void FlInvalidParameterHandler(const TdWchar* expression, const TdWchar* function,
+                                       const TdWchar* file, unsigned int line, size_t reserved) {
+  (void)expression; (void)function; (void)file; (void)line; (void)reserved;
+  FlCrashDumpNoException("Invalid parameter detected in CRT function");
+  _exit(3);
+}
+
+// CRT pure virtual call handler
+static void FlPureCallHandler(void) {
+  FlCrashDumpNoException("Pure virtual function call");
+  _exit(3);
+}
+
+// abort() handler - called when abort() is invoked
+static void FlAbortHandler(int sig) {
+  (void)sig;
+  FlCrashDumpNoException("abort() called");
+  _exit(3);
+}
 
 #elif defined(_TD_DARWIN_64)
 
@@ -128,13 +360,71 @@ LONG WINAPI exceptionHandler(LPEXCEPTION_POINTERS exception);
 #include <unistd.h>
 
 static pid_t tsProcId;
-static char  tsSysNetFile[] = "/proc/net/dev";
-static char  tsSysCpuFile[] = "/proc/stat";
-static char  tsCpuPeriodFile[] = "/sys/fs/cgroup/cpu/cpu.cfs_period_us";
-static char  tsCpuQuotaFile[] = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us";
+static const char *tsSysNetFile = "/proc/net/dev";
+static const char *tsSysCpuFile = "/proc/stat";
+static const char *tsCpuPeriodFile = "/sys/fs/cgroup/cpu/cpu.cfs_period_us";
+static const char *tsCpuQuotaFile = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us";
 static char  tsProcCpuFile[25] = {0};
 static char  tsProcMemFile[25] = {0};
 static char  tsProcIOFile[25] = {0};
+
+// cgroup v2 paths
+static const char *tsCgroupV2CpuMaxFile = "/sys/fs/cgroup/cpu.max";
+static const char *tsCgroupV2MemMaxFile = "/sys/fs/cgroup/memory.max";
+static const char *tsCgroupV2MemCurFile = "/sys/fs/cgroup/memory.current";
+static const char *tsCgroupV2MemStatFile = "/sys/fs/cgroup/memory.stat";
+static const char *tsCgroupV2CpuStatFile = "/sys/fs/cgroup/cpu.stat";
+
+// cgroup v1 memory paths
+static const char *tsCgroupV1MemLimitFile = "/sys/fs/cgroup/memory/memory.limit_in_bytes";
+static const char *tsCgroupV1MemUsageFile = "/sys/fs/cgroup/memory/memory.usage_in_bytes";
+static const char *tsCgroupV1MemStatFile = "/sys/fs/cgroup/memory/memory.stat";
+static const char *tsCgroupV1CpuAcctFile = "/sys/fs/cgroup/cpuacct/cpuacct.usage";
+
+// Returns: 2 for cgroup v2, 1 for cgroup v1, 0 for no cgroup
+static int32_t taosDetectCgroupVersion() {
+  static volatile int32_t cgroupVersion = -1;
+
+  int32_t ver = atomic_load_32(&cgroupVersion);
+  if (ver >= 0) return ver;
+
+  if (taosCheckExistFile("/sys/fs/cgroup/cgroup.controllers")) {
+    ver = 2;
+  } else if (taosCheckExistFile(tsCpuQuotaFile) || taosCheckExistFile(tsCgroupV1MemLimitFile)) {
+    ver = 1;
+  } else {
+    ver = 0;
+  }
+
+  (void)atomic_val_compare_exchange_32(&cgroupVersion, -1, ver);
+  return ver;
+}
+
+// Read a single int64 value from a cgroup file. Returns 0 on success.
+static int32_t taosReadCgroupInt64(const char *path, int64_t *value) {
+  if (path == NULL || value == NULL) return -1;
+  TdFilePtr pFile = taosOpenFile(path, TD_FILE_READ | TD_FILE_STREAM);
+  if (pFile == NULL) return -1;
+
+  char line[64] = {0};
+  if (taosGetsFile(pFile, sizeof(line), line) <= 0) {
+    TAOS_SKIP_ERROR(taosCloseFile(&pFile));
+    return -1;
+  }
+  TAOS_SKIP_ERROR(taosCloseFile(&pFile));
+
+  // "max" means no limit
+  if (strncmp(line, "max", 3) == 0) {
+    *value = INT64_MAX;
+    return 0;
+  }
+
+  char *endPtr = NULL;
+  int64_t v = taosStr2Int64(line, &endPtr, 10);
+  if (endPtr == line) return -1;
+  *value = v;
+  return 0;
+}
 
 static void taosGetProcIOnfos() {
   tsPageSizeKB = sysconf(_SC_PAGESIZE) / 1024;
@@ -554,6 +844,73 @@ int32_t taosGetCpuInfo(char *cpuModel, int32_t maxLen, float *numOfCores) {
 #endif
 }
 
+#if !defined(WINDOWS) && !defined(_TD_DARWIN_64) && !defined(TD_ASTRA)
+// Try cgroup v2 cpu.max: format "$MAX $PERIOD" or "max $PERIOD"
+static int32_t taosCntrGetCpuCoresV2(float *numOfCores) {
+  TdFilePtr pFile = taosOpenFile(tsCgroupV2CpuMaxFile, TD_FILE_READ | TD_FILE_STREAM);
+  if (pFile == NULL) return -1;
+
+  char line[64] = {0};
+  if (taosGetsFile(pFile, sizeof(line), line) <= 0) {
+    TAOS_SKIP_ERROR(taosCloseFile(&pFile));
+    return -1;
+  }
+  TAOS_SKIP_ERROR(taosCloseFile(&pFile));
+
+  // "max" means no CPU limit
+  if (strncmp(line, "max", 3) == 0) {
+    return -1;
+  }
+
+  int64_t quota = 0, period = 0;
+  if (sscanf(line, "%" PRId64 " %" PRId64, &quota, &period) != 2 || period <= 0 || quota <= 0) {
+    return -1;
+  }
+
+  double quotaCores = (double)quota / (double)period;
+  double sysCores = (double)sysconf(_SC_NPROCESSORS_ONLN);
+  *numOfCores = (float)((quotaCores < sysCores && quotaCores > 0) ? quotaCores : sysCores);
+  return (*numOfCores > 0) ? 0 : -1;
+}
+
+// Try cgroup v1 cpu.cfs_quota_us / cpu.cfs_period_us
+static int32_t taosCntrGetCpuCoresV1(float *numOfCores) {
+  TdFilePtr pFile = NULL;
+  if (!(pFile = taosOpenFile(tsCpuQuotaFile, TD_FILE_READ | TD_FILE_STREAM))) {
+    return -1;
+  }
+  char qline[32] = {0};
+  if (taosGetsFile(pFile, sizeof(qline), qline) <= 0) {
+    TAOS_SKIP_ERROR(taosCloseFile(&pFile));
+    return -1;
+  }
+  TAOS_SKIP_ERROR(taosCloseFile(&pFile));
+
+  int64_t quota = taosStr2Int64(qline, NULL, 10);
+  if (quota < 0) {
+    return -1;
+  }
+
+  if (!(pFile = taosOpenFile(tsCpuPeriodFile, TD_FILE_READ | TD_FILE_STREAM))) {
+    return -1;
+  }
+  char pline[32] = {0};
+  if (taosGetsFile(pFile, sizeof(pline), pline) <= 0) {
+    TAOS_SKIP_ERROR(taosCloseFile(&pFile));
+    return -1;
+  }
+  TAOS_SKIP_ERROR(taosCloseFile(&pFile));
+
+  int64_t period = taosStr2Int64(pline, NULL, 10);
+  if (period <= 0) return -1;
+
+  double quotaCores = (double)quota / (double)period;
+  double sysCores = (double)sysconf(_SC_NPROCESSORS_ONLN);
+  *numOfCores = (float)((quotaCores < sysCores && quotaCores > 0) ? quotaCores : sysCores);
+  return (*numOfCores > 0) ? 0 : -1;
+}
+#endif  // !WINDOWS && !_TD_DARWIN_64 && !TD_ASTRA
+
 // Returns the container's CPU quota if successful, otherwise returns the physical CPU cores
 static int32_t taosCntrGetCpuCores(float *numOfCores) {
 #ifdef WINDOWS
@@ -561,56 +918,20 @@ static int32_t taosCntrGetCpuCores(float *numOfCores) {
 #elif defined(_TD_DARWIN_64) || defined(TD_ASTRA)
   return TSDB_CODE_UNSUPPORT_OS;
 #else
-  TdFilePtr pFile = NULL;
-  if (!(pFile = taosOpenFile(tsCpuQuotaFile, TD_FILE_READ | TD_FILE_STREAM))) {
-    goto _sys;
+  int32_t cgroupVer = taosDetectCgroupVersion();
+
+  if (cgroupVer == 2 && taosCntrGetCpuCoresV2(numOfCores) == 0) {
+    return 0;
   }
-  char qline[32] = {0};
-  if (taosGetsFile(pFile, sizeof(qline), qline) <= 0) {
-    TAOS_SKIP_ERROR(taosCloseFile(&pFile));
-    goto _sys;
-  }
-  
-  TAOS_SKIP_ERROR(taosCloseFile(&pFile));
-  float quota = taosStr2Float(qline, NULL);
-  if (quota < 0) {
-    goto _sys;
+  if (cgroupVer >= 1 && taosCntrGetCpuCoresV1(numOfCores) == 0) {
+    return 0;
   }
 
-  if (!(pFile = taosOpenFile(tsCpuPeriodFile, TD_FILE_READ | TD_FILE_STREAM))) {
-    goto _sys;
-  }
-  
-  char pline[32] = {0};
-  if (taosGetsFile(pFile, sizeof(pline), pline) <= 0) {
-    TAOS_SKIP_ERROR(taosCloseFile(&pFile));
-    goto _sys;
-  }
-  
-  TAOS_SKIP_ERROR(taosCloseFile(&pFile));
-
-  float period = taosStr2Float(pline, NULL);
-  float quotaCores = quota / period;
-  float sysCores = sysconf(_SC_NPROCESSORS_ONLN);
-  if (quotaCores < sysCores && quotaCores > 0) {
-    *numOfCores = quotaCores;
-  } else {
-    *numOfCores = sysCores;
-  }
-  if(*numOfCores <= 0) {
-    return TAOS_SYSTEM_ERROR(ERRNO);
-  }
-  goto _end;
-  
-_sys:
   *numOfCores = sysconf(_SC_NPROCESSORS_ONLN);
   if(*numOfCores <= 0) {
     return TAOS_SYSTEM_ERROR(ERRNO);
   }
-  
-_end:
   return 0;
-  
 #endif
 }
 
@@ -646,6 +967,42 @@ int32_t taosGetCpuCores(float *numOfCores, bool physical) {
 #endif
 }
 
+#if !defined(WINDOWS) && !defined(_TD_DARWIN_64) && !defined(TD_ASTRA)
+// Read cgroup CPU usage in microseconds. Returns 0 on success.
+static int32_t taosGetCgroupCpuUsageUsec(int64_t *usageUsec) {
+  if (usageUsec == NULL) return -1;
+
+  int32_t cgroupVer = taosDetectCgroupVersion();
+  if (cgroupVer == 2) {
+    // cgroup v2: cpu.stat has "usage_usec <value>"
+    TdFilePtr pFile = taosOpenFile(tsCgroupV2CpuStatFile, TD_FILE_READ | TD_FILE_STREAM);
+    if (pFile == NULL) return -1;
+    char line[256] = {0};
+    while (taosGetsFile(pFile, sizeof(line), line) > 0) {
+      if (strncmp(line, "usage_usec", 10) == 0) {
+        if (sscanf(line + 10, " %" PRId64, usageUsec) != 1) {
+          TAOS_SKIP_ERROR(taosCloseFile(&pFile));
+          return -1;
+        }
+        TAOS_SKIP_ERROR(taosCloseFile(&pFile));
+        return 0;
+      }
+    }
+    TAOS_SKIP_ERROR(taosCloseFile(&pFile));
+    return -1;
+  } else if (cgroupVer == 1) {
+    // cgroup v1: cpuacct.usage is in nanoseconds
+    int64_t usageNs = 0;
+    if (taosReadCgroupInt64(tsCgroupV1CpuAcctFile, &usageNs) == 0) {
+      *usageUsec = usageNs / 1000;
+      return 0;
+    }
+    return -1;
+  }
+  return -1;
+}
+#endif  // !WINDOWS && !_TD_DARWIN_64 && !TD_ASTRA
+
 int32_t taosGetCpuUsage(double *cpu_system, double *cpu_engine) {
   static int64_t lastSysUsed = -1;
   static int64_t lastSysTotal = -1;
@@ -653,9 +1010,47 @@ int32_t taosGetCpuUsage(double *cpu_system, double *cpu_engine) {
   static int64_t curSysUsed = 0;
   static int64_t curSysTotal = 0;
   static int64_t curProcTotal = 0;
+#if !defined(WINDOWS) && !defined(_TD_DARWIN_64) && !defined(TD_ASTRA)
+  static int64_t lastCgroupUsageUsec = -1;
+  static int64_t lastWallTimeUsec = -1;
+#endif
 
   if (cpu_system != NULL) *cpu_system = 0;
   if (cpu_engine != NULL) *cpu_engine = 0;
+
+  bool    cgroupUsed = false;
+
+#if !defined(WINDOWS) && !defined(_TD_DARWIN_64) && !defined(TD_ASTRA)
+  // Try container-aware CPU usage first
+  int32_t cgroupVer = taosDetectCgroupVersion();
+  int64_t cgroupUsageUsec = 0;
+
+  if (cgroupVer > 0 && taosGetCgroupCpuUsageUsec(&cgroupUsageUsec) == 0) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) goto _proc_stat;
+    int64_t wallTimeUsec = (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+
+    if (lastCgroupUsageUsec >= 0 && lastWallTimeUsec >= 0) {
+      int64_t deltaUsage = cgroupUsageUsec - lastCgroupUsageUsec;
+      int64_t deltaWall = wallTimeUsec - lastWallTimeUsec;
+      if (deltaWall > 0 && deltaUsage >= 0) {
+        float numCores = 0;
+        TAOS_SKIP_ERROR(taosGetCpuCores(&numCores, false));
+        if (numCores <= 0) numCores = 1;
+        if (cpu_system != NULL) {
+          *cpu_system = (double)deltaUsage / (double)deltaWall / numCores * 100.0;
+          if (*cpu_system > 100.0) *cpu_system = 100.0;
+        }
+        cgroupUsed = true;
+      }
+    }
+    lastCgroupUsageUsec = cgroupUsageUsec;
+    lastWallTimeUsec = wallTimeUsec;
+  }
+
+_proc_stat:
+  ;
+#endif
 
   SysCpuInfo  sysCpu = {0};
   ProcCpuInfo procCpu = {0};
@@ -667,7 +1062,7 @@ int32_t taosGetCpuUsage(double *cpu_system, double *cpu_engine) {
 
     if(lastSysUsed >= 0 && lastSysTotal >=0 && lastProcTotal >=0){
       if (curSysTotal - lastSysTotal > 0 && curSysUsed >= lastSysUsed && curProcTotal >= lastProcTotal) {
-        if (cpu_system != NULL) {
+        if (!cgroupUsed && cpu_system != NULL) {
           *cpu_system = (curSysUsed - lastSysUsed) / (double)(curSysTotal - lastSysTotal) * 100;
         }
         if (cpu_engine != NULL) {
@@ -737,10 +1132,30 @@ int32_t taosGetTotalMemory(int64_t *totalKB) {
   *totalKB = (int64_t)256 * 1024;
   return 0;
 #else
-  *totalKB = (int64_t)(sysconf(_SC_PHYS_PAGES) * tsPageSizeKB);
+  int64_t pageSizeKB = tsPageSizeKB;
+  if (pageSizeKB <= 0) {
+    pageSizeKB = sysconf(_SC_PAGESIZE) / 1024;
+  }
+  *totalKB = (int64_t)(sysconf(_SC_PHYS_PAGES) * pageSizeKB);
   if(*totalKB <= 0) {
     return TAOS_SYSTEM_ERROR(ERRNO);
   }
+
+  // Apply cgroup memory limit if available
+  int32_t cgroupVer = taosDetectCgroupVersion();
+  int64_t cgroupLimitBytes = INT64_MAX;
+  if (cgroupVer == 2) {
+    TAOS_SKIP_ERROR(taosReadCgroupInt64(tsCgroupV2MemMaxFile, &cgroupLimitBytes));
+  } else if (cgroupVer == 1) {
+    TAOS_SKIP_ERROR(taosReadCgroupInt64(tsCgroupV1MemLimitFile, &cgroupLimitBytes));
+  }
+  if (cgroupLimitBytes > 0 && cgroupLimitBytes < INT64_MAX) {
+    int64_t cgroupLimitKB = cgroupLimitBytes / 1024;
+    if (cgroupLimitKB > 0 && cgroupLimitKB < *totalKB) {
+      *totalKB = cgroupLimitKB;
+    }
+  }
+
   return 0;
 #endif
 }
@@ -809,6 +1224,30 @@ int32_t taosGetSysAvailMemory(int64_t *availSize) {
   *availSize = 0;
   return 0;
 #else
+  // Try cgroup-aware available memory first
+  int32_t cgroupVer = taosDetectCgroupVersion();
+  int64_t cgroupLimit = 0;
+  int64_t cgroupCurrent = 0;
+
+  if (cgroupVer == 2) {
+    if (taosReadCgroupInt64(tsCgroupV2MemMaxFile, &cgroupLimit) == 0 &&
+        taosReadCgroupInt64(tsCgroupV2MemCurFile, &cgroupCurrent) == 0 &&
+        cgroupLimit > 0 && cgroupLimit < INT64_MAX) {
+      *availSize = (cgroupLimit > cgroupCurrent) ? (cgroupLimit - cgroupCurrent) : 0;
+      return 0;
+    }
+  } else if (cgroupVer == 1) {
+    // v1 uses a huge sentinel (near INT64_MAX) for "no limit"; also compare against physical memory
+    int64_t physMemBytes = (int64_t)sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGESIZE);
+    if (taosReadCgroupInt64(tsCgroupV1MemLimitFile, &cgroupLimit) == 0 &&
+        taosReadCgroupInt64(tsCgroupV1MemUsageFile, &cgroupCurrent) == 0 &&
+        cgroupLimit > 0 && cgroupLimit < INT64_MAX && cgroupLimit < physMemBytes) {
+      *availSize = (cgroupLimit > cgroupCurrent) ? (cgroupLimit - cgroupCurrent) : 0;
+      return 0;
+    }
+  }
+
+  // Fallback to /proc/meminfo
   TdFilePtr pFile = taosOpenFile("/proc/meminfo", TD_FILE_READ | TD_FILE_STREAM);
   if (pFile == NULL) {
     return terrno;
@@ -845,8 +1284,47 @@ int32_t taosGetSysAvailMemory(int64_t *availSize) {
 #endif
 }
 
-int32_t taosGetSysMemory(int64_t *usedKB) {
+static void taosGetMemValue(char* line, char* key, int64_t* value){
+  if(value == NULL) return;
+  *value = 0;
+  if(line == NULL || line[0] == '\0') return;
+
+  char *colon_pos = strchr(line, ':');
+  if (colon_pos != NULL) {
+    *colon_pos = '\0';
+    if(sscanf(line, "%s", key) != 1){
+      key[0] = '\0';
+    }
+    if (sscanf(colon_pos + 1, "%" PRId64, value) != 1) {
+      *value = 0;
+    }
+  }
+}
+
+// Read "inactive_file" from cgroup memory.stat
+static int64_t taosGetCgroupMemCache(const char *statFile) {
+  TdFilePtr pFile = taosOpenFile(statFile, TD_FILE_READ | TD_FILE_STREAM);
+  if (pFile == NULL) return 0;
+
+  char    line[256] = {0};
+  int64_t inactiveFile = 0;
+  while (taosGetsFile(pFile, sizeof(line), line) > 0) {
+    if (strncmp(line, "inactive_file", 13) == 0) {
+      if (sscanf(line + 13, " %" PRId64, &inactiveFile) == 1) break;
+    }
+    // cgroup v1 uses "total_inactive_file"
+    if (strncmp(line, "total_inactive_file", 19) == 0) {
+      if (sscanf(line + 19, " %" PRId64, &inactiveFile) == 1) break;
+    }
+  }
+  TAOS_SKIP_ERROR(taosCloseFile(&pFile));
+  return inactiveFile;
+}
+
+int32_t taosGetSysMemory(int64_t *usedKB, int64_t *freeKB, int64_t *cacheBufferKB) {
   OS_PARAM_CHECK(usedKB);
+  OS_PARAM_CHECK(freeKB);
+  OS_PARAM_CHECK(cacheBufferKB);
 #ifdef WINDOWS
   MEMORYSTATUSEX memsStat;
   memsStat.dwLength = sizeof(memsStat);
@@ -858,15 +1336,108 @@ int32_t taosGetSysMemory(int64_t *usedKB) {
   int64_t nMemTotal = memsStat.ullTotalPhys / 1024.0;
 
   *usedKB = nMemTotal - nMemFree;
+  *freeKB = nMemFree;
+  *cacheBufferKB = 0;
   return 0;
 #elif defined(_TD_DARWIN_64) || defined(TD_ASTRA) // TD_ASTRA_TODO
   *usedKB = 0;
+  *freeKB = 0;
+  *cacheBufferKB = 0;
   return 0;
 #else
-  *usedKB = sysconf(_SC_AVPHYS_PAGES) * tsPageSizeKB;
-  if(*usedKB <= 0) {
-    return TAOS_SYSTEM_ERROR(ERRNO);
+  // Try cgroup-aware memory stats first
+  int32_t cgroupVer = taosDetectCgroupVersion();
+  int64_t cgroupLimit = 0;
+  int64_t cgroupCurrent = 0;
+
+  if (cgroupVer == 2) {
+    if (taosReadCgroupInt64(tsCgroupV2MemMaxFile, &cgroupLimit) == 0 &&
+        taosReadCgroupInt64(tsCgroupV2MemCurFile, &cgroupCurrent) == 0 &&
+        cgroupLimit > 0 && cgroupLimit < INT64_MAX) {
+      int64_t cache = taosGetCgroupMemCache(tsCgroupV2MemStatFile);
+      *cacheBufferKB = cache / 1024;
+      *usedKB = (cgroupCurrent > cache) ? (cgroupCurrent - cache) / 1024 : 0;
+      *freeKB = (cgroupLimit > cgroupCurrent) ? (cgroupLimit - cgroupCurrent) / 1024 : 0;
+      return 0;
+    }
+  } else if (cgroupVer == 1) {
+    // v1 uses a huge sentinel (near INT64_MAX) for "no limit"; also compare against physical memory
+    int64_t physMemBytes = (int64_t)sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGESIZE);
+    if (taosReadCgroupInt64(tsCgroupV1MemLimitFile, &cgroupLimit) == 0 &&
+        taosReadCgroupInt64(tsCgroupV1MemUsageFile, &cgroupCurrent) == 0 &&
+        cgroupLimit > 0 && cgroupLimit < INT64_MAX && cgroupLimit < physMemBytes) {
+      int64_t cache = taosGetCgroupMemCache(tsCgroupV1MemStatFile);
+      *cacheBufferKB = cache / 1024;
+      *usedKB = (cgroupCurrent > cache) ? (cgroupCurrent - cache) / 1024 : 0;
+      *freeKB = (cgroupLimit > cgroupCurrent) ? (cgroupLimit - cgroupCurrent) / 1024 : 0;
+      return 0;
+    }
   }
+
+  // Fallback to /proc/meminfo
+  TdFilePtr pFile = taosOpenFile("/proc/meminfo", TD_FILE_READ | TD_FILE_STREAM);
+  if (pFile == NULL) {
+    return terrno;
+  }
+
+  char    line[1024] = {0};
+  char    key[1024] = {0};
+  int64_t  value = 0;
+  ssize_t bytes = 0;
+
+  //MemTotal
+  int64_t total = 0;
+
+  //MemFree
+  int64_t mfree = 0;
+
+  //MemAvailable
+  int64_t available = 0;
+
+  //Buffers
+  int64_t buffer = 0;
+
+  //Cached
+  int64_t cached = 0;
+
+  //SwapCached ,Active, Inactive, Active(anon), Inactive(anon), Active(file), Inactive(file), Unevictable, Mlocked, SwapTotal
+
+  //SwapFree
+  int64_t swapFree = 0;
+
+  //Dirty, Writeback, AnonPages, Mapped, Shmem, KReclaimable, Slab
+
+  //SReclaimable
+  int64_t sReclaimable = 0;
+
+  for(int32_t i=0; i < 30; i++){
+    bytes = taosGetsFile(pFile, sizeof(line), line);
+    if (bytes < 0) {
+      TAOS_SKIP_ERROR(taosCloseFile(&pFile));
+      return terrno;
+    }
+    if (line[0] != 'M' && line[0] != 'B' && line[0] != 'C' && line[0] != 'S') {
+      line[0] = 0;
+      continue;
+    }
+    taosGetMemValue(line, key, &value);
+    if(strncmp(key, "MemTotal", 1024) == 0) {total = value; continue;}
+    if(strncmp(key, "MemFree", 1024) == 0) {mfree = value; continue;}
+    if(strncmp(key, "MemAvailable", 1024) == 0) {available = value; continue;}
+    if(strncmp(key, "Buffers", 1024) == 0) {buffer = value; continue;}
+    if(strncmp(key, "Cached", 1024) == 0) {cached = value; continue;}
+    if(strncmp(key, "SwapFree", 1024) == 0) {swapFree = value; continue;}
+    if(strncmp(key, "SReclaimable", 1024) == 0) {sReclaimable = value; continue;}
+  }
+
+  //free   Unused memory (MemFree and SwapFree in /proc/meminfo)
+  *freeKB = mfree;
+  //buffers Memory used by kernel buffers (Buffers in /proc/meminfo)
+  //cache  Memory used by the page cache and slabs (Cached and SReclaimable in /proc/meminfo)
+  *cacheBufferKB = buffer + cached + sReclaimable;
+  *usedKB = total - *freeKB - *cacheBufferKB;
+  
+  TAOS_SKIP_ERROR(taosCloseFile(&pFile));
   return 0;
 #endif
 }
@@ -1280,8 +1851,21 @@ int64_t taosGetOsUptime() {
 void taosSetCoreDump(bool enable) {
   if (!enable) return;
 #ifdef WINDOWS
-  SetUnhandledExceptionFilter(exceptionHandler);
+  /* Register vectored exception handler FIRST - it runs before SEH and can
+   * catch heap corruption (STATUS_HEAP_CORRUPTION 0xC0000374) which may
+   * bypass SetUnhandledExceptionFilter in some cases. */
+  AddVectoredExceptionHandler(1, FlVectoredExceptionHandler);
+  
+  /* Also set the unhandled exception filter for normal crashes */
   SetUnhandledExceptionFilter(&FlCrashDump);
+  
+  /* Register CRT handlers for various runtime errors */
+  _set_invalid_parameter_handler(FlInvalidParameterHandler);
+  _set_purecall_handler(FlPureCallHandler);
+  
+  /* Handle abort() calls */
+  signal(SIGABRT, FlAbortHandler);
+  
 #elif defined(_TD_DARWIN_64) || defined(TD_ASTRA)
 #else
   // 1. set ulimit -c unlimited

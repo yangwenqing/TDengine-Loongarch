@@ -22,6 +22,26 @@ import datetime
 from .epath import *
 from .eos import *
 from .log import *
+from .sql import tdSql
+
+TAOS = "taos"
+TAOSDUMP = "taosdump"
+TAOSBENCHMARK = "taosBenchmark"
+TAOSADAPTER = "taosadapter"
+TAOSK = "taosk"
+
+# taos
+def taosFile():
+    """Get the path to the `taos` binary file.
+
+    Returns:
+        str: The full path to the `taos` binary file, with `.exe` appended if on Windows.
+    """
+
+    bmFile = binFile(TAOS)
+    if isWin():
+        bmFile += ".exe"
+    return bmFile
 
 # taosdump
 def taosDumpFile():
@@ -30,7 +50,7 @@ def taosDumpFile():
     Returns:
         str: The full path to the `taosdump` binary file, with `.exe` appended if on Windows.
     """
-    bmFile = binFile("taosdump")
+    bmFile = binFile(TAOSDUMP)
     if isWin():
         bmFile += ".exe"
     return bmFile
@@ -45,7 +65,7 @@ def benchMarkFile():
     Returns:
         str: The full path to the `taosBenchmark` binary file, with `.exe` appended if on Windows.
     """
-    bmFile = binFile("taosBenchmark")
+    bmFile = binFile(TAOSBENCHMARK)
     if isWin():
         bmFile += ".exe"
     return bmFile
@@ -60,7 +80,19 @@ def taosAdapterFile():
     Returns:
         str: The full path to the `taosAdapter` binary file, with `.exe` appended if on Windows.
     """
-    bmFile = binFile("taosAdapter")
+    bmFile = binFile(TAOSADAPTER)
+    if isWin():
+        bmFile += ".exe"
+    return bmFile
+
+# taosk
+def taoskFile():
+    """Get the path to the `taosk` binary file.
+
+    Returns:
+        str: The full path to the `taosk` binary file, with `.exe` appended if on Windows.
+    """
+    bmFile = binFile(TAOSK)
     if isWin():
         bmFile += ".exe"
     return bmFile
@@ -81,14 +113,17 @@ def benchMark(command = "", json = "") :
 
     # run
     if command != "":
-        exe(bmFile + " " + command + " -y")
+        if "-a" in command or "--replica" in command:
+            exe(bmFile + " " + command + " -y")
+        else:
+            exe(bmFile + " " + command + f" -y -a {tdSql.replica}")
     if json != "":
         cmd = f"{bmFile} -f {json}"
         print(cmd)
         status = exe(cmd)
         if status !=0:
-          tdLog.exit(f"run failed {cmd} status={status}")
-       
+            tdLog.exit(f"run failed {cmd} status={status}")
+
 
 # get current directory file name
 def curFile(fullPath, filename):
@@ -101,11 +136,11 @@ def curFile(fullPath, filename):
     Returns:
         str: The full path to the file in the current directory.
     """
-    return os.path.dirname(fullPath) + "/" + filename
+    return os.path.join(os.path.dirname(fullPath), filename)
 
 
 # run build/bin file
-def runBinFile(fname, command, show=True):
+def runBinFile(fname, command, show = True, checkRun = False, retFail = False ):
     """Run a binary file with the specified command.
 
     Args:
@@ -116,14 +151,14 @@ def runBinFile(fname, command, show=True):
     Returns:
         list: The output of the command as a list of strings.
     """
-    binFile = binFile(fname)
+    bin_file = binFile(fname)
     if isWin():
-        binFile += ".exe"
+        bin_file += ".exe"
 
-    cmd = f"{binFile} {command}"
+    cmd = f"{bin_file} {command}"
     if show:
         tdLog.info(cmd)
-    return runRetList(cmd)
+    return runRetList(cmd, checkRun=checkRun, retFail=retFail, show=show)
 
 # exe build/bin file
 def exeBinFile(fname, command, wait=True, show=True):
@@ -146,16 +181,45 @@ def exeBinFile(fname, command, wait=True, show=True):
              while a non-zero value indicates failure.
              - If `wait` is False, the return value is the exit status of the `nohup` or `mintty` command.
     """
-    binFile = binFile(fname)
+    bin_file = binFile(fname)
     if isWin():
-        binFile += ".exe"
+        bin_file += ".exe"
 
-    cmd = f"{binFile} {command}"
+    cmd = f"{bin_file} {command}"
     if wait:
         if show:
             tdLog.info("wait exe:" + cmd)
-        return exe(f"{binFile} {command}")
+        return exe(f"{bin_file} {command}")
     else:
         if show:
             tdLog.info("no wait exe:" + cmd)
         return exeNoWait(cmd)
+
+#
+#  run bin file
+#
+
+# taos
+def taos(command, show = True, checkRun = False):
+    return runBinFile(TAOS, command, show, checkRun)
+
+def taosdump(command, show = True, checkRun = True, retFail = True):
+    return runBinFile(TAOSDUMP, command, show, checkRun, retFail)
+
+def benchmark(command, show = True, checkRun = True, retFail = True):
+    return runBinFile(TAOSBENCHMARK, command, show, checkRun, retFail)        
+
+def getFilePath(base_dir, *parts):
+    """
+    Get the full path to a file, ensuring compatibility with Windows paths.
+    
+    Args:
+        *parts (str): The parts of the file path.
+        
+    Returns:
+        str: The full path to the file.
+    """
+    file_path = os.path.join(os.path.dirname(base_dir), *parts)
+    if platform.system().lower() == 'windows':
+        file_path = file_path.replace("\\", "\\\\")
+    return file_path

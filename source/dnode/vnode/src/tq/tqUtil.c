@@ -32,25 +32,22 @@ int32_t tqInitDataRsp(SMqDataRsp* pRsp, STqOffsetVal pOffset) {
   pRsp->blockDataLen = taosArrayInit(0, sizeof(int32_t));
   TSDB_CHECK_NULL(pRsp->blockDataLen, code, lino, END, terrno);
 
+  pRsp->blockSchema = taosArrayInit(0, sizeof(void*));
+  TSDB_CHECK_NULL(pRsp->blockSchema, code, lino, END, terrno);
+  
   tOffsetCopy(&pRsp->reqOffset, &pOffset);
   tOffsetCopy(&pRsp->rspOffset, &pOffset);
   pRsp->withTbName = 0;
-  pRsp->withSchema = false;
+  pRsp->withSchema = 1;
 
 END:
   if (code != 0){
     tqError("%s failed at:%d, code:%s", __FUNCTION__ , lino, tstrerror(code));
+    taosArrayDestroy(pRsp->blockData);
+    taosArrayDestroy(pRsp->blockDataLen);
+    taosArrayDestroy(pRsp->blockSchema);
   }
   return code;
-}
-
-void tqUpdateNodeStage(STQ* pTq, bool isLeader) {
-  SSyncState state = syncGetState(pTq->pVnode->sync);
-  streamMetaUpdateStageRole(pTq->pStreamMeta, state.term, isLeader);
-
-  if (isLeader) {
-    tqScanWalAsync(pTq);
-  }
 }
 
 static int32_t tqInitTaosxRsp(SMqDataRsp* pRsp, STqOffsetVal pOffset) {
@@ -171,19 +168,10 @@ static int32_t extractDataAndRspForNormalSubscribe(STQ* pTq, STqHandle* pHandle,
     goto end;
   }
 
-  //   till now, all data has been transferred to consumer, new data needs to push client once arrived.
-  if (terrno == TSDB_CODE_WAL_LOG_NOT_EXIST && dataRsp.blockNum == 0) {
-    // lock
-    taosWLockLatch(&pTq->lock);
-    int64_t ver = walGetCommittedVer(pTq->pVnode->pWal);
-    if (dataRsp.rspOffset.version > ver) {  // check if there are data again to avoid lost data
-      code = tqRegisterPushHandle(pTq, pHandle, pMsg);
-      taosWUnLockLatch(&pTq->lock);
-      goto end;
-    }
-    taosWUnLockLatch(&pTq->lock);
+  if (terrno == TSDB_CODE_TMQ_FETCH_TIMEOUT && dataRsp.blockNum == 0) {
+    dataRsp.timeout = true;
   }
-
+  
   // reqOffset represents the current date offset, may be changed if wal not exists
   tOffsetCopy(&dataRsp.reqOffset, pOffset);
   code = tqSendDataRsp(pHandle, pMsg, pRequest, &dataRsp, TMQ_MSG_TYPE__POLL_DATA_RSP, vgId);
@@ -305,6 +293,7 @@ goto END;
 tqOffsetResetToLog(&taosxRsp.rspOffset, fetchVer);\
 code = tqSendDataRsp(pHandle, pMsg, pRequest, &taosxRsp, POLL_RSP_TYPE(pRequest, taosxRsp), vgId);\
 goto END;
+
 static int32_t extractDataAndRspForDbStbSubscribe(STQ* pTq, STqHandle* pHandle, const SMqPollReq* pRequest,
                                                   SRpcMsg* pMsg, STqOffsetVal* offset) {
   int32_t         vgId = TD_VID(pTq->pVnode);
@@ -370,7 +359,7 @@ static int32_t extractDataAndRspForDbStbSubscribe(STQ* pTq, STqHandle* pHandle, 
           if (pHead->msgType == TDMT_VND_CREATE_TABLE) {
             PROCESS_EXCLUDED_MSG(SVCreateTbBatchReq, tDecodeSVCreateTbBatchReq, tDeleteSVCreateTbBatchReq)
           } else if (pHead->msgType == TDMT_VND_ALTER_TABLE) {
-            PROCESS_EXCLUDED_MSG(SVAlterTbReq, tDecodeSVAlterTbReq, tDeleteCommon)
+            PROCESS_EXCLUDED_MSG(SVAlterTbReq, tDecodeSVAlterTbReq, destroyAlterTbReq)
           } else if (pHead->msgType == TDMT_VND_CREATE_STB || pHead->msgType == TDMT_VND_ALTER_STB) {
             PROCESS_EXCLUDED_MSG(SVCreateStbReq, tDecodeSVCreateStbReq, tDeleteCommon)
           } else if (pHead->msgType == TDMT_VND_DELETE) {
@@ -395,7 +384,7 @@ static int32_t extractDataAndRspForDbStbSubscribe(STQ* pTq, STqHandle* pHandle, 
           goto END;
         }
         totalMetaRows++;
-        if ((taosArrayGetSize(btMetaRsp.batchMetaReq) >= tmqRowSize) || (taosGetTimestampMs() - st > pRequest->timeout)) {
+        if ((taosArrayGetSize(btMetaRsp.batchMetaReq) >= pRequest->minPollRows) || (taosGetTimestampMs() - st > pRequest->timeout)) {
           SEND_BATCH_META_RSP
         }
         continue;
@@ -422,14 +411,21 @@ static int32_t extractDataAndRspForDbStbSubscribe(STQ* pTq, STqHandle* pHandle, 
           code = buildBatchMeta(&btMetaRsp, TDMT_VND_CREATE_TABLE, len, pBuf);
         }
         taosMemoryFree(pBuf);
-        taosArrayDestroyP(taosxRsp.createTableReq, NULL);
+        for (int i = 0; i < taosArrayGetSize(taosxRsp.createTableReq); i++) {
+          void* pCreateTbReq = taosArrayGetP(taosxRsp.createTableReq, i);
+          if (pCreateTbReq != NULL) {
+            tDestroySVSubmitCreateTbReq(pCreateTbReq, TSDB_MSG_FLG_DECODE);
+          }
+          taosMemoryFree(pCreateTbReq);
+        }
+        taosArrayDestroy(taosxRsp.createTableReq);
         taosxRsp.createTableReq = NULL;
         fetchVer++;
         if (code != 0){
           goto END;
         }
         totalMetaRows++;
-        if ((taosArrayGetSize(btMetaRsp.batchMetaReq) >= tmqRowSize) ||
+        if ((taosArrayGetSize(btMetaRsp.batchMetaReq) >= pRequest->minPollRows) ||
             (taosGetTimestampMs() - st > pRequest->timeout) ||
             (!pRequest->enableBatchMeta && !pRequest->useSnapshot)) {
           SEND_BATCH_META_RSP
@@ -649,226 +645,4 @@ int32_t tqDoSendDataRsp(const SRpcHandleInfo* pRpcHandleInfo, SMqDataRsp* pRsp, 
 
   tmsgSendRsp(&rsp);
   return 0;
-}
-
-int32_t tqExtractDelDataBlock(const void* pData, int32_t len, int64_t ver, void** pRefBlock, int32_t type, EStreamType blockType) {
-  int32_t     code = 0;
-  int32_t     line = 0;
-  SDecoder*   pCoder = &(SDecoder){0};
-  SDeleteRes* pRes = &(SDeleteRes){0};
-
-  *pRefBlock = NULL;
-
-  pRes->uidList = taosArrayInit(0, sizeof(tb_uid_t));
-  TSDB_CHECK_NULL(pRes->uidList, code, line, END, terrno)
-
-  tDecoderInit(pCoder, (uint8_t*)pData, len);
-  code = tDecodeDeleteRes(pCoder, pRes);
-  TSDB_CHECK_CODE(code, line, END);
-
-  int32_t numOfTables = taosArrayGetSize(pRes->uidList);
-  if (numOfTables == 0 || pRes->affectedRows == 0) {
-    goto END;
-  }
-
-  SSDataBlock* pDelBlock = NULL;
-  code = createSpecialDataBlock(blockType, &pDelBlock);
-  TSDB_CHECK_CODE(code, line, END);
-
-  code = blockDataEnsureCapacity(pDelBlock, numOfTables);
-  TSDB_CHECK_CODE(code, line, END);
-
-  pDelBlock->info.rows = numOfTables;
-  pDelBlock->info.version = ver;
-
-  for (int32_t i = 0; i < numOfTables; i++) {
-    // start key column
-    SColumnInfoData* pStartCol = taosArrayGet(pDelBlock->pDataBlock, START_TS_COLUMN_INDEX);
-    TSDB_CHECK_NULL(pStartCol, code, line, END, terrno)
-    code = colDataSetVal(pStartCol, i, (const char*)&pRes->skey, false);  // end key column
-    TSDB_CHECK_CODE(code, line, END);
-    SColumnInfoData* pEndCol = taosArrayGet(pDelBlock->pDataBlock, END_TS_COLUMN_INDEX);
-    TSDB_CHECK_NULL(pEndCol, code, line, END, terrno)
-    code = colDataSetVal(pEndCol, i, (const char*)&pRes->ekey, false);
-    TSDB_CHECK_CODE(code, line, END);
-    // uid column
-    SColumnInfoData* pUidCol = taosArrayGet(pDelBlock->pDataBlock, UID_COLUMN_INDEX);
-    TSDB_CHECK_NULL(pUidCol, code, line, END, terrno)
-
-    int64_t* pUid = taosArrayGet(pRes->uidList, i);
-    code = colDataSetVal(pUidCol, i, (const char*)pUid, false);
-    TSDB_CHECK_CODE(code, line, END);
-    void* tmp = taosArrayGet(pDelBlock->pDataBlock, GROUPID_COLUMN_INDEX);
-    TSDB_CHECK_NULL(tmp, code, line, END, terrno)
-    colDataSetNULL(tmp, i);
-    tmp = taosArrayGet(pDelBlock->pDataBlock, CALCULATE_START_TS_COLUMN_INDEX);
-    TSDB_CHECK_NULL(tmp, code, line, END, terrno)
-    colDataSetNULL(tmp, i);
-    tmp = taosArrayGet(pDelBlock->pDataBlock, CALCULATE_END_TS_COLUMN_INDEX);
-    TSDB_CHECK_NULL(tmp, code, line, END, terrno)
-    colDataSetNULL(tmp, i);
-    tmp = taosArrayGet(pDelBlock->pDataBlock, TABLE_NAME_COLUMN_INDEX);
-    TSDB_CHECK_NULL(tmp, code, line, END, terrno)
-    colDataSetNULL(tmp, i);
-  }
-
-  if (type == 0) {
-    code = taosAllocateQitem(sizeof(SStreamRefDataBlock), DEF_QITEM, 0, pRefBlock);
-    if (code) {
-      blockDataCleanup(pDelBlock);
-      taosMemoryFree(pDelBlock);
-      return code;
-    }
-
-    ((SStreamRefDataBlock*)(*pRefBlock))->type = STREAM_INPUT__REF_DATA_BLOCK;
-    ((SStreamRefDataBlock*)(*pRefBlock))->pBlock = pDelBlock;
-  } else if (type == 1) {
-    *pRefBlock = pDelBlock;
-  } else {
-    tqError("unknown type:%d", type);
-    code = TSDB_CODE_TMQ_CONSUMER_ERROR;
-  }
-
-END:
-  if (code != 0) {
-    tqError("failed to extract delete data block, line:%d code:%d", line, code);
-  }
-  tDecoderClear(pCoder);
-  taosArrayDestroy(pRes->uidList);
-  return code;
-}
-
-int32_t tqGetStreamExecInfo(SVnode* pVnode, int64_t streamId, int64_t* pDelay, bool* fhFinished) {
-  SStreamMeta* pMeta = pVnode->pTq->pStreamMeta;
-  int32_t      numOfTasks = taosArrayGetSize(pMeta->pTaskList);
-  int32_t      code = TSDB_CODE_SUCCESS;
-
-  if (pDelay != NULL) {
-    *pDelay = 0;
-  }
-
-  *fhFinished = false;
-
-  if (numOfTasks <= 0) {
-    return code;
-  }
-
-  // extract the required source task for a given stream, identified by streamId
-  streamMetaRLock(pMeta);
-
-  numOfTasks = taosArrayGetSize(pMeta->pTaskList);
-
-  for (int32_t i = 0; i < numOfTasks; ++i) {
-    SStreamTaskId* pId = taosArrayGet(pMeta->pTaskList, i);
-    if (pId == NULL) {
-      continue;
-    }
-    if (pId->streamId != streamId) {
-      continue;
-    }
-
-    STaskId      id = {.streamId = pId->streamId, .taskId = pId->taskId};
-    SStreamTask* pTask = NULL;
-
-    code = streamMetaAcquireTaskUnsafe(pMeta, &id, &pTask);
-    if (code != 0) {
-      tqError("vgId:%d failed to acquire task:0x%x in retrieving progress", pMeta->vgId, pId->taskId);
-      continue;
-    }
-
-    if (pTask->info.taskLevel != TASK_LEVEL__SOURCE) {
-      streamMetaReleaseTask(pMeta, pTask);
-      continue;
-    }
-
-    // here we get the required stream source task
-    *fhFinished = !HAS_RELATED_FILLHISTORY_TASK(pTask);
-
-    int64_t ver = walReaderGetCurrentVer(pTask->exec.pWalReader);
-    if (ver == -1) {
-      ver = pTask->chkInfo.processedVer;
-    } else {
-      ver--;
-    }
-
-    SVersionRange verRange = {0};
-    walReaderValidVersionRange(pTask->exec.pWalReader, &verRange.minVer, &verRange.maxVer);
-
-    SWalReader* pReader = walOpenReader(pTask->exec.pWalReader->pWal, NULL, 0);
-    if (pReader == NULL) {
-      tqError("failed to open wal reader to extract exec progress, vgId:%d", pMeta->vgId);
-      streamMetaReleaseTask(pMeta, pTask);
-      continue;
-    }
-
-    int64_t cur = 0;
-    int64_t latest = 0;
-
-    code = walFetchHead(pReader, ver);
-    if (code == TSDB_CODE_SUCCESS) {
-      cur = pReader->pHead->head.ingestTs;
-    }
-
-    if (ver == verRange.maxVer) {
-      latest = cur;
-    } else {
-      code = walFetchHead(pReader, verRange.maxVer);
-      if (code == TSDB_CODE_SUCCESS) {
-        latest = pReader->pHead->head.ingestTs;
-      }
-    }
-
-    if (pDelay != NULL) {  // delay in ms
-      *pDelay = (latest - cur) / 1000;
-    }
-
-    walCloseReader(pReader);
-    streamMetaReleaseTask(pMeta, pTask);
-  }
-
-  streamMetaRUnLock(pMeta);
-
-  return TSDB_CODE_SUCCESS;
-}
-
-int32_t tqExtractDropCtbDataBlock(const void* data, int32_t len, int64_t ver, void** pRefBlock, int32_t type) {
-  int32_t          code = 0;
-  int32_t          lino = 0;
-  SDecoder         dc = {0};
-  SVDropTbBatchReq batchReq = {0};
-  tDecoderInit(&dc, (uint8_t*)data, len);
-  code = tDecodeSVDropTbBatchReq(&dc, &batchReq);
-  TSDB_CHECK_CODE(code, lino, _exit);
-  if (batchReq.nReqs <= 0) goto _exit;
-
-  SSDataBlock* pBlock = NULL;
-  code = createSpecialDataBlock(STREAM_DROP_CHILD_TABLE, &pBlock);
-  TSDB_CHECK_CODE(code, lino, _exit);
-
-  code = blockDataEnsureCapacity(pBlock, batchReq.nReqs);
-  TSDB_CHECK_CODE(code, lino, _exit);
-
-  pBlock->info.rows = batchReq.nReqs;
-  pBlock->info.version = ver;
-  for (int32_t i = 0; i < batchReq.nReqs; ++i) {
-    SVDropTbReq* pReq = batchReq.pReqs + i;
-    SColumnInfoData* pCol = taosArrayGet(pBlock->pDataBlock, UID_COLUMN_INDEX);
-    TSDB_CHECK_NULL(pCol, code, lino, _exit, terrno);
-    code = colDataSetVal(pCol, i, (const char* )&pReq->uid, false);
-    TSDB_CHECK_CODE(code, lino, _exit);
-  }
-
-  code = taosAllocateQitem(sizeof(SStreamRefDataBlock), DEF_QITEM, 0, pRefBlock);
-  TSDB_CHECK_CODE(code, lino, _exit);
-  ((SStreamRefDataBlock*)(*pRefBlock))->type = STREAM_INPUT__REF_DATA_BLOCK;
-  ((SStreamRefDataBlock*)(*pRefBlock))->pBlock = pBlock;
-
-_exit:
-  tDecoderClear(&dc);
-  if (TSDB_CODE_SUCCESS != code) {
-    tqError("faled to extract drop ctb data block, line:%d code:%s", lino, tstrerror(code));
-    blockDataCleanup(pBlock);
-    taosMemoryFree(pBlock);
-  }
-  return code;
 }

@@ -58,8 +58,12 @@ int32_t syncNodeReplicateReset(SSyncNode* pNode, SRaftId* pDestId) {
 
 int32_t syncNodeReplicate(SSyncNode* pNode) {
   SSyncLogBuffer* pBuf = pNode->pLogBuf;
-  (void)taosThreadMutexLock(&pBuf->mutex);
-  int32_t ret = syncNodeReplicateWithoutLock(pNode);
+  int32_t         ret = 0;
+  if ((ret = taosThreadMutexTryLock(&pBuf->mutex)) != 0) {
+    sWarn("vgId:%d, failed to get log buffer mutex since %d", pNode->vgId, ret);
+    return TSDB_CODE_FAIL_GET_LOCK;
+  }
+  ret = syncNodeReplicateWithoutLock(pNode);
   (void)taosThreadMutexUnlock(&pBuf->mutex);
 
   TAOS_RETURN(ret);
@@ -139,8 +143,8 @@ int32_t syncNodeHeartbeatPeers(SSyncNode* pSyncNode) {
 
     // send msg
     TRACE_SET_MSGID(&(rpcMsg.info.traceId), tGenIdPI64());
-    sGTrace(&rpcMsg.info.traceId, "vgId:%d, send sync-heartbeat to dnode:%d", pSyncNode->vgId, DID(&(pSyncMsg->destId)));
-    syncLogSendHeartbeat(pSyncNode, pSyncMsg, true, 0, 0);
+    TRACE_SET_ROOTID(&(rpcMsg.info.traceId), tGenIdPI64());
+    syncLogSendHeartbeat(pSyncNode, pSyncMsg, true, 0, 0, &(rpcMsg.info.traceId));
     int32_t ret = syncNodeSendHeartbeat(pSyncNode, &pSyncMsg->destId, &rpcMsg);
     if (ret != 0) {
       sError("vgId:%d, failed to send sync-heartbeat since %s", pSyncNode->vgId, tstrerror(ret));

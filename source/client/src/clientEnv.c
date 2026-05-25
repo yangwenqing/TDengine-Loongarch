@@ -38,10 +38,8 @@
 #include "ttime.h"
 #include "tversion.h"
 
+#include "clientSession.h"
 #include "cus_name.h"
-
-#define TSC_VAR_NOT_RELEASE 1
-#define TSC_VAR_RELEASED    0
 
 #define ENV_JSON_FALSE_CHECK(c)                     \
   do {                                              \
@@ -71,14 +69,15 @@ int32_t   clientConnRefPool = -1;
 int32_t   clientStop = -1;
 SHashObj *pTimezoneMap = NULL;
 
-int32_t timestampDeltaLimit = 900;  // s
-
 static TdThreadOnce tscinit = PTHREAD_ONCE_INIT;
 volatile int32_t    tscInitRes = 0;
 
 static int32_t registerRequest(SRequestObj *pRequest, STscObj *pTscObj) {
   int32_t code = TSDB_CODE_SUCCESS;
   // connection has been released already, abort creating request.
+  if (!mayCreateAsyncWork()) {
+    return TSDB_CODE_APP_IS_STOPPING;
+  }
   pRequest->self = taosAddRef(clientReqRefPool, pRequest);
   if (pRequest->self < 0) {
     tscError("failed to add ref to request");
@@ -93,7 +92,8 @@ static int32_t registerRequest(SRequestObj *pRequest, STscObj *pTscObj) {
 
     int32_t total = atomic_add_fetch_64((int64_t *)&pSummary->totalRequests, 1);
     int32_t currentInst = atomic_add_fetch_64((int64_t *)&pSummary->currentRequests, 1);
-    tscDebug("req:0x%" PRIx64 ", create request from conn:0x%" PRIx64 ", current:%d, app current:%d, total:%d, QID:0x%" PRIx64,
+    tscDebug("req:0x%" PRIx64 ", create request from conn:0x%" PRIx64
+             ", current:%d, app current:%d, total:%d, QID:0x%" PRIx64,
              pRequest->self, pRequest->pTscObj->id, num, currentInst, total, pRequest->requestId);
   }
 
@@ -116,7 +116,7 @@ static void concatStrings(SArray *list, char *buf, int size) {
       (void)strncat(buf, ",", size - 1 - len);
       len += 1;
     }
-    int ret = tsnprintf(buf + len, size - len, "%s", db);
+    int ret = snprintf(buf + len, size - len, "%s", db);
     if (ret < 0) {
       tscError("snprintf failed, buf:%s, ret:%d", buf, ret);
       break;
@@ -198,8 +198,8 @@ static int32_t generateWriteSlowLog(STscObj *pTscObj, SRequestObj *pRequest, int
   }
 
   char *value = cJSON_PrintUnformatted(json);
-  if (value == NULL) {
-    tscError("failed to print json");
+  if (value == NULL || strlen(value) == 0) {
+    tscError("failed to print json, data:%s", value == NULL ? "null" : value);
     code = TSDB_CODE_FAILED;
     goto _end;
   }
@@ -322,8 +322,11 @@ void closeTransporter(SAppInstInfo *pAppInfo) {
     return;
   }
 
-  tscDebug("free transporter:%p in app inst %p", pAppInfo->pTransporter, pAppInfo);
-  rpcClose(pAppInfo->pTransporter);
+  void *pTransporter = pAppInfo->pTransporter;
+  pAppInfo->pTransporter = NULL;
+
+  tscDebug("free transporter:%p in app inst %p", pTransporter, pAppInfo);
+  rpcClose(pTransporter);
 }
 
 static bool clientRpcRfp(int32_t code, tmsg_t msgType) {
@@ -333,6 +336,11 @@ static bool clientRpcRfp(int32_t code, tmsg_t msgType) {
         msgType == TDMT_SCH_TASK_NOTIFY) {
       return false;
     }
+    return true;
+  } else if (code == TSDB_CODE_UTIL_QUEUE_OUT_OF_MEMORY || code == TSDB_CODE_OUT_OF_RPC_MEMORY_QUEUE ||
+             code == TSDB_CODE_SYN_WRITE_STALL || code == TSDB_CODE_SYN_PROPOSE_NOT_READY ||
+             code == TSDB_CODE_SYN_RESTORING) {
+    tscDebug("client msg type %s should retry since %s", TMSG_INFO(msgType), tstrerror(code));
     return true;
   } else {
     return false;
@@ -358,7 +366,7 @@ int32_t openTransporter(const char *user, const char *auth, int32_t numOfThread,
   rpcInit.rfp = clientRpcRfp;
   rpcInit.sessions = 1024;
   rpcInit.connType = TAOS_CONN_CLIENT;
-  rpcInit.user = (char *)user;
+  rpcInit.user = (char *)(user ? user : auth);
   rpcInit.idleTime = tsShellActivityTimer * 1000;
   rpcInit.compressSize = tsCompressMsgSize;
   rpcInit.dfp = destroyAhandle;
@@ -376,6 +384,16 @@ int32_t openTransporter(const char *user, const char *auth, int32_t numOfThread,
   rpcInit.timeToGetConn = tsTimeToGetAvailableConn;
   rpcInit.startReadTimer = 1;
   rpcInit.readTimeout = tsReadTimeout;
+  rpcInit.ipv6 = tsEnableIpv6;
+  rpcInit.enableSSL = tsEnableTLS;
+  rpcInit.enableSasl = tsEnableSasl;
+  rpcInit.isToken = user == NULL ? 1 : 0;
+
+  memcpy(rpcInit.caPath, tsTLSCaPath, strlen(tsTLSCaPath));
+  memcpy(rpcInit.certPath, tsTLSSvrCertPath, strlen(tsTLSSvrCertPath));
+  memcpy(rpcInit.keyPath, tsTLSSvrKeyPath, strlen(tsTLSSvrKeyPath));
+  memcpy(rpcInit.cliCertPath, tsTLSCliCertPath, strlen(tsTLSCliCertPath));
+  memcpy(rpcInit.cliKeyPath, tsTLSCliKeyPath, strlen(tsTLSCliKeyPath));
 
   int32_t code = taosVersionStrToInt(td_version, &rpcInit.compatibilityVer);
   if (TSDB_CODE_SUCCESS != code) {
@@ -383,6 +401,7 @@ int32_t openTransporter(const char *user, const char *auth, int32_t numOfThread,
     return code;
   }
 
+  tscInfo("rpc max retry timeout %" PRId64 "", rpcInit.retryMaxTimeout);
   *pDnodeConn = rpcOpen(&rpcInit);
   if (*pDnodeConn == NULL) {
     tscError("failed to init connection to server since %s", tstrerror(terrno));
@@ -424,7 +443,7 @@ void stopAllRequests(SHashObj *pRequests) {
 
 void destroyAppInst(void *info) {
   SAppInstInfo *pAppInfo = *(SAppInstInfo **)info;
-  tscDebug("destroy app inst mgr %p", pAppInfo);
+  tscInfo("destroy app inst mgr %p", pAppInfo);
 
   int32_t code = taosThreadMutexLock(&appInfo.mutex);
   if (TSDB_CODE_SUCCESS != code) {
@@ -454,6 +473,10 @@ void destroyAppInst(void *info) {
 
   taosMemoryFree(pAppInfo);
 }
+
+//  tscObj 1--->conn1
+/// tscObj 2-->conn1
+//  tscObj 3-->conn1
 
 void destroyTscObj(void *pObj) {
   if (NULL == pObj) {
@@ -499,8 +522,16 @@ int32_t createTscObj(const char *user, const char *auth, const char *db, int32_t
   (*pObj)->connType = connType;
   (*pObj)->pAppInfo = pAppInfo;
   (*pObj)->appHbMgrIdx = pAppInfo->pAppHbMgr->idx;
-  tstrncpy((*pObj)->user, user, sizeof((*pObj)->user));
-  (void)memcpy((*pObj)->pass, auth, TSDB_PASSWORD_LEN);
+  if (user == NULL) {
+    (*pObj)->user[0] = 0;
+    (*pObj)->pass[0] = 0;
+    tstrncpy((*pObj)->token, auth, sizeof((*pObj)->token));
+  } else {
+    tstrncpy((*pObj)->user, user, sizeof((*pObj)->user));
+    (void)memcpy((*pObj)->pass, auth, TSDB_PASSWORD_LEN);
+  }
+  (*pObj)->tokenName[0] = 0;
+  (*pObj)->enable = 1;  // enabled by default
 
   if (db != NULL) {
     tstrncpy((*pObj)->db, db, tListLen((*pObj)->db));
@@ -520,6 +551,7 @@ int32_t createTscObj(const char *user, const char *auth, const char *db, int32_t
 
   (void)atomic_add_fetch_64(&(*pObj)->pAppInfo->numOfConns, 1);
 
+  updateConnAccessInfo(&(*pObj)->sessInfo);
   tscInfo("conn:0x%" PRIx64 ", created, p:%p", (*pObj)->id, *pObj);
   return code;
 }
@@ -544,6 +576,10 @@ int32_t createRequest(uint64_t connId, int32_t type, int64_t reqid, SRequestObj 
   if (pTscObj == NULL) {
     TSC_ERR_JRET(TSDB_CODE_TSC_DISCONNECTED);
   }
+  if (pTscObj->enable == 0) {
+    releaseTscObj(connId);
+    TSC_ERR_JRET(TSDB_CODE_MND_USER_DISABLED);
+  }
   SSyncQueryParam *interParam = taosMemoryCalloc(1, sizeof(SSyncQueryParam));
   if (interParam == NULL) {
     releaseTscObj(connId);
@@ -556,6 +592,8 @@ int32_t createRequest(uint64_t connId, int32_t type, int64_t reqid, SRequestObj 
   (*pRequest)->resType = RES_TYPE__QUERY;
   (*pRequest)->requestId = reqid == 0 ? generateRequestId() : reqid;
   (*pRequest)->metric.start = taosGetTimestampUs();
+  (*pRequest)->execPhase = QUERY_PHASE_NONE;
+  (*pRequest)->phaseStartTime = 0;
 
   (*pRequest)->body.resInfo.convertUcs4 = true;  // convert ucs4 by default
   (*pRequest)->body.resInfo.charsetCxt = pTscObj->optionInfo.charsetCxt;
@@ -705,6 +743,12 @@ void doDestroyRequest(void *p) {
     tscError("failed to destroy semaphore");
   }
 
+  SSessParam para = {.type = SESSION_MAX_CONCURRENCY, .value = -1, .noCheck = 1};
+  code = tscUpdateSessMetric(pRequest->pTscObj, &para);
+  if (TSDB_CODE_SUCCESS != code) {
+    tscError("failed to update session metric, code:%s", tstrerror(code));
+  }
+
   taosArrayDestroy(pRequest->tableList);
   taosArrayDestroy(pRequest->targetTableList);
   destroyQueryExecRes(&pRequest->body.resInfo.execRes);
@@ -723,6 +767,12 @@ void doDestroyRequest(void *p) {
   taosMemoryFree(pRequest->body.interParam);
 
   qDestroyQuery(pRequest->pQuery);
+
+  // `pRequest->parseMeta` may be filled during stmt parsing and must be released
+  // when the request object is destroyed, otherwise LeakSanitizer will report
+  // catalog async response result leaks.
+  catalogFreeMetaData(&pRequest->parseMeta);
+  TAOS_MEMSET(&pRequest->parseMeta, 0, sizeof(pRequest->parseMeta));
   nodesDestroyAllocator(pRequest->allocatorRefId);
 
   taosMemoryFreeClear(pRequest->effectiveUser);
@@ -1069,6 +1119,7 @@ void taos_init_imp(void) {
   ENV_ERR_RET(taosInitLogOutput(&logName), "failed to init log output");
   if (taosCreateLog(logName, 10, configDir, NULL, NULL, NULL, NULL, 1) != 0) {
     (void)printf(" WARING: Create %s failed:%s. configDir=%s\n", logName, strerror(ERRNO), configDir);
+    SET_ERROR_MSG("Create %s failed:%s. configDir=%s", logName, strerror(ERRNO), configDir);
     tscInitRes = terrno;
     return;
   }
@@ -1087,7 +1138,7 @@ void taos_init_imp(void) {
     return;
   }
 #endif
-#if !defined(WINDOWS) && !defined(TD_ASTRA)
+#if !defined(TD_ASTRA)
   ENV_ERR_RET(tzInit(), "failed to init timezone");
 #endif
   ENV_ERR_RET(monitorInit(), "failed to init monitor");
@@ -1115,13 +1166,18 @@ void taos_init_imp(void) {
 
   ENV_ERR_RET(taosGetAppName(appInfo.appName, NULL), "failed to get app name");
   ENV_ERR_RET(taosThreadMutexInit(&appInfo.mutex, NULL), "failed to init thread mutex");
-#ifdef USE_REPORT  
+#ifdef USE_REPORT
   ENV_ERR_RET(tscCrashReportInit(), "failed to init crash report");
 #endif
   ENV_ERR_RET(qInitKeywordsTable(), "failed to init parser keywords table");
 #ifdef TAOSD_INTEGRATED
   ENV_ERR_RET(shellStartDaemon(0, NULL), "failed to start taosd daemon");
 #endif
+
+  if (tsSessionControl) {
+    ENV_ERR_RET(sessMgtInit(), "failed to init session management");
+  }
+
   tscInfo("TAOS driver is initialized successfully");
 }
 

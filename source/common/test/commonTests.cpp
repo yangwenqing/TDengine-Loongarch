@@ -12,15 +12,43 @@
 #include "tcommon.h"
 #include "tdatablock.h"
 #include "tdef.h"
+#include "dmRepair.h"
 #include "tmisce.h"
 #include "ttime.h"
 #include "ttokendef.h"
 #include "tvariant.h"
 #include "tanalytics.h"
+#include "tglobal.h"
 
+#ifdef TD_ENTERPRISE
 namespace {
-//
+class ClsConfigDynamicTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    taosCleanupCfg();
+    tsClsEnabled = false;
+    tsClsRefreshInterval = 3600;
+    gGrantClsPreRefreshInterval = 3600;
+    ASSERT_EQ(cfgInit(&tsCfg), TSDB_CODE_SUCCESS);
+    ASSERT_EQ(cfgAddBool(tsCfg, "clsEnabled", tsClsEnabled, CFG_SCOPE_SERVER, CFG_DYN_SERVER, CFG_CATEGORY_GLOBAL,
+                         CFG_PRIV_SYSTEM),
+              TSDB_CODE_SUCCESS);
+    ASSERT_EQ(cfgAddInt32(tsCfg, "clsRefreshInterval", tsClsRefreshInterval, 1, 86400, CFG_SCOPE_SERVER,
+                          CFG_DYN_SERVER, CFG_CATEGORY_GLOBAL, CFG_PRIV_SYSTEM),
+              TSDB_CODE_SUCCESS);
+  }
+
+  void TearDown() override { taosCleanupCfg(); }
+
+  void applyServerConfig(const char *name, const char *value, ECfgSrcType stype = CFG_STYPE_ALTER_SERVER_CMD) {
+    SConfig *pCfg = taosGetCfg();
+    ASSERT_NE(pCfg, nullptr);
+    ASSERT_EQ(cfgSetItem(pCfg, name, value, stype, true), TSDB_CODE_SUCCESS);
+    ASSERT_EQ(taosCfgDynamicOptions(pCfg, name, true), TSDB_CODE_SUCCESS);
+  }
+};
 }  // namespace
+#endif
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
@@ -236,6 +264,43 @@ TEST(testCase, toInteger_test) {
   ASSERT_EQ(ret, -1);
 }
 
+#ifdef TD_ENTERPRISE
+TEST_F(ClsConfigDynamicTest, clsEnabledTransitionKeepsLastExplicitRefreshInterval) {
+  ASSERT_EQ(tsClsEnabled, false);
+  ASSERT_EQ(tsClsRefreshInterval, 3600);
+
+  applyServerConfig("clsRefreshInterval", "30");
+  ASSERT_EQ(tsClsRefreshInterval, 30);
+
+  applyServerConfig("clsEnabled", "1");
+  ASSERT_EQ(tsClsEnabled, true);
+  ASSERT_EQ(gGrantClsPreRefreshInterval, 30);
+  ASSERT_EQ(tsClsRefreshInterval, 2);
+
+  applyServerConfig("clsEnabled", "0");
+  ASSERT_EQ(tsClsEnabled, false);
+  ASSERT_EQ(gGrantClsPreRefreshInterval, 30);
+  ASSERT_EQ(tsClsRefreshInterval, 1);
+
+  applyServerConfig("clsEnabled", "1");
+  ASSERT_EQ(tsClsEnabled, true);
+  ASSERT_EQ(gGrantClsPreRefreshInterval, 30);
+  ASSERT_EQ(tsClsRefreshInterval, 2);
+
+  applyServerConfig("clsRefreshInterval", "40");
+  ASSERT_EQ(tsClsRefreshInterval, 40);
+
+  applyServerConfig("clsEnabled", "0");
+  ASSERT_EQ(tsClsEnabled, false);
+  ASSERT_EQ(gGrantClsPreRefreshInterval, 40);
+  ASSERT_EQ(tsClsRefreshInterval, 1);
+}
+#endif
+
+TEST(testCase, dmRepairDefaultsToNoWalRepair) {
+  ASSERT_FALSE(dmRepairNeedWalRepair(123));
+}
+
 TEST(testCase, Datablock_test_inc) {
   {
     SColumnInfoData cinfo = {0};
@@ -328,10 +393,10 @@ TEST(testCase, Datablock_test) {
   SColumnInfoData* p1 = (SColumnInfoData*)taosArrayGet(b->pDataBlock, 1);
   for (int32_t i = 0; i < 40; ++i) {
     if (i & 0x01) {
-      ASSERT_EQ(colDataIsNull_f(p0->nullbitmap, i), false);
+      ASSERT_EQ(colDataIsNull_f(p0, i), false);
       ASSERT_EQ(colDataIsNull(p1, b->info.rows, i, nullptr), false);
     } else {
-      ASSERT_EQ(colDataIsNull_f(p0->nullbitmap, i), true);
+      ASSERT_EQ(colDataIsNull_f(p0, i), true);
 
       ASSERT_EQ(colDataIsNull(p0, b->info.rows, i, nullptr), true);
       ASSERT_EQ(colDataIsNull(p1, b->info.rows, i, nullptr), true);
@@ -531,7 +596,8 @@ void test_ts2char(int64_t ts, const char* format, int32_t precison, const char* 
 
 TEST(timeTest, ts2char) {
   osDefaultInit();
-  if (taosGetLocalTimezoneOffset() != TdEastZone8) GTEST_SKIP();
+  int32_t code = 0;
+  if (taosGetLocalTimezoneOffset(&code) != TdEastZone8) GTEST_SKIP();
   int64_t     ts;
   const char* format = "YYYY-MM-DD";
   ts = 0;
@@ -583,9 +649,10 @@ TEST(timeTest, ts2char) {
 
 TEST(timeTest, char2ts) {
   osDefaultInit();
-  if (taosGetLocalTimezoneOffset() != TdEastZone8) GTEST_SKIP();
+  int32_t code = 0;
+  if (taosGetLocalTimezoneOffset(&code) != TdEastZone8) GTEST_SKIP();
   int64_t ts;
-  int32_t code =
+  code =
       TEST_char2ts("YYYY-DD-MM HH12:MI:SS:MSPM", &ts, TSDB_TIME_PRECISION_MILLI, "2023-10-10 12:00:00.000AM");
   ASSERT_EQ(code, 0);
   ASSERT_EQ(ts, 1696867200000LL);
@@ -684,7 +751,7 @@ TEST(timeTest, char2ts) {
 
   // default to 1970-1-1 00:00:00+08 -> 1969-12-31 16:00:00+00
   ASSERT_EQ(0, TEST_char2ts("YYYY", &ts, TSDB_TIME_PRECISION_SECONDS, "1970"));
-  ASSERT_EQ(ts, -1 * taosGetLocalTimezoneOffset());
+  ASSERT_EQ(ts, -1 * taosGetLocalTimezoneOffset(&code));
 
   ASSERT_EQ(0, TEST_char2ts("yyyyMM1/dd ", &ts, TSDB_TIME_PRECISION_MICRO, "210001/2"));
   ASSERT_EQ(ts, 4102502400000000LL);
@@ -793,7 +860,7 @@ TEST(AlreadyAddGroupIdTest, GroupIdAddedWithDifferentLength) {
 #define SLOW_LOG_TYPE_OTHERS 0x4
 #define SLOW_LOG_TYPE_ALL    0x7
 
-static int32_t taosSetSlowLogScope(char* pScopeStr, int32_t* pScope) {
+static int32_t taosSetSlowLogScope2(char* pScopeStr, int32_t* pScope) {
   if (NULL == pScopeStr || 0 == strlen(pScopeStr)) {
     *pScope = SLOW_LOG_TYPE_QUERY;
     TAOS_RETURN(TSDB_CODE_SUCCESS);
@@ -845,7 +912,7 @@ static int32_t taosSetSlowLogScope(char* pScopeStr, int32_t* pScope) {
 TEST(TaosSetSlowLogScopeTest, NullPointerInput) {
   char*   pScopeStr = NULL;
   int32_t scope = 0;
-  int32_t result = taosSetSlowLogScope(pScopeStr, &scope);
+  int32_t result = taosSetSlowLogScope2(pScopeStr, &scope);
   EXPECT_EQ(result, TSDB_CODE_SUCCESS);
   EXPECT_EQ(scope, SLOW_LOG_TYPE_QUERY);
 }
@@ -853,7 +920,7 @@ TEST(TaosSetSlowLogScopeTest, NullPointerInput) {
 TEST(TaosSetSlowLogScopeTest, EmptyStringInput) {
   char    pScopeStr[1] = "";
   int32_t scope = 0;
-  int32_t result = taosSetSlowLogScope(pScopeStr, &scope);
+  int32_t result = taosSetSlowLogScope2(pScopeStr, &scope);
   EXPECT_EQ(result, TSDB_CODE_SUCCESS);
   EXPECT_EQ(scope, SLOW_LOG_TYPE_QUERY);
 }
@@ -861,7 +928,7 @@ TEST(TaosSetSlowLogScopeTest, EmptyStringInput) {
 TEST(TaosSetSlowLogScopeTest, AllScopeInput) {
   char    pScopeStr[] = "all";
   int32_t scope = 0;
-  int32_t result = taosSetSlowLogScope(pScopeStr, &scope);
+  int32_t result = taosSetSlowLogScope2(pScopeStr, &scope);
   EXPECT_EQ(result, TSDB_CODE_SUCCESS);
 
   EXPECT_EQ(scope, SLOW_LOG_TYPE_ALL);
@@ -870,7 +937,7 @@ TEST(TaosSetSlowLogScopeTest, AllScopeInput) {
 TEST(TaosSetSlowLogScopeTest, QueryScopeInput) {
   char    pScopeStr[] = " query";
   int32_t scope = 0;
-  int32_t result = taosSetSlowLogScope(pScopeStr, &scope);
+  int32_t result = taosSetSlowLogScope2(pScopeStr, &scope);
   EXPECT_EQ(result, TSDB_CODE_SUCCESS);
   EXPECT_EQ(scope, SLOW_LOG_TYPE_QUERY);
 }
@@ -878,7 +945,7 @@ TEST(TaosSetSlowLogScopeTest, QueryScopeInput) {
 TEST(TaosSetSlowLogScopeTest, InsertScopeInput) {
   char    pScopeStr[] = "insert";
   int32_t scope = 0;
-  int32_t result = taosSetSlowLogScope(pScopeStr, &scope);
+  int32_t result = taosSetSlowLogScope2(pScopeStr, &scope);
   EXPECT_EQ(result, TSDB_CODE_SUCCESS);
   EXPECT_EQ(scope, SLOW_LOG_TYPE_INSERT);
 }
@@ -886,7 +953,7 @@ TEST(TaosSetSlowLogScopeTest, InsertScopeInput) {
 TEST(TaosSetSlowLogScopeTest, OthersScopeInput) {
   char    pScopeStr[] = "others";
   int32_t scope = 0;
-  int32_t result = taosSetSlowLogScope(pScopeStr, &scope);
+  int32_t result = taosSetSlowLogScope2(pScopeStr, &scope);
   EXPECT_EQ(result, TSDB_CODE_SUCCESS);
   EXPECT_EQ(scope, SLOW_LOG_TYPE_OTHERS);
 }
@@ -894,7 +961,7 @@ TEST(TaosSetSlowLogScopeTest, OthersScopeInput) {
 TEST(TaosSetSlowLogScopeTest, NoneScopeInput) {
   char    pScopeStr[] = "none";
   int32_t scope = 0;
-  int32_t result = taosSetSlowLogScope(pScopeStr, &scope);
+  int32_t result = taosSetSlowLogScope2(pScopeStr, &scope);
   EXPECT_EQ(result, TSDB_CODE_SUCCESS);
   EXPECT_EQ(scope, SLOW_LOG_TYPE_NULL);
 }
@@ -902,7 +969,7 @@ TEST(TaosSetSlowLogScopeTest, NoneScopeInput) {
 TEST(TaosSetSlowLogScopeTest, InvalidScopeInput) {
   char    pScopeStr[] = "invalid";
   int32_t scope = 0;
-  int32_t result = taosSetSlowLogScope(pScopeStr, &scope);
+  int32_t result = taosSetSlowLogScope2(pScopeStr, &scope);
   // EXPECT_EQ(result, TSDB_CODE_SUCCESS);
   // EXPECT_EQ(scope, -1);
 }
@@ -910,7 +977,7 @@ TEST(TaosSetSlowLogScopeTest, InvalidScopeInput) {
 TEST(TaosSetSlowLogScopeTest, MixedScopesInput) {
   char    pScopeStr[] = "query|insert|others|none";
   int32_t scope = 0;
-  int32_t result = taosSetSlowLogScope(pScopeStr, &scope);
+  int32_t result = taosSetSlowLogScope2(pScopeStr, &scope);
   EXPECT_EQ(result, TSDB_CODE_SUCCESS);
   EXPECT_EQ(scope, (SLOW_LOG_TYPE_QUERY | SLOW_LOG_TYPE_INSERT | SLOW_LOG_TYPE_OTHERS));
 }
@@ -918,7 +985,7 @@ TEST(TaosSetSlowLogScopeTest, MixedScopesInput) {
 TEST(TaosSetSlowLogScopeTest, MixedScopesInputWithSpaces) {
   char    pScopeStr[] = "query | insert | others ";
   int32_t scope = 0;
-  int32_t result = taosSetSlowLogScope(pScopeStr, &scope);
+  int32_t result = taosSetSlowLogScope2(pScopeStr, &scope);
   EXPECT_EQ(result, TSDB_CODE_SUCCESS);
   EXPECT_EQ(scope, (SLOW_LOG_TYPE_QUERY | SLOW_LOG_TYPE_INSERT | SLOW_LOG_TYPE_OTHERS));
 }
@@ -1021,5 +1088,231 @@ TEST(testCase, function_param_check) {
 
   taosMemoryFree(param);
 }
+
+TEST(testCase, function_fqdn) {
+  tsEnableIpv6 = 1;
+  {
+    SEp ep = {0};
+    char *para = "127.0.0.1";
+   taosGetFqdnPortFromEp(para, &ep);
+    ASSERT_EQ(strcmp(ep.fqdn, "127.0.0.1"), 0);
+    ASSERT_EQ(ep.port, 6030);
+  }
+
+  {
+    SEp ep = {0};
+    char *para = "::1";
+   taosGetFqdnPortFromEp (para, &ep);
+    ASSERT_EQ(strcmp(ep.fqdn, "::1"), 0);
+    ASSERT_EQ(ep.port, tsServerPort);
+  }
+   
+  {
+    SEp ep = {0};
+    char *para = "::1:6030";
+   taosGetFqdnPortFromEp(para, &ep);
+    ASSERT_EQ(strcmp(ep.fqdn, "::1"), 0);
+    ASSERT_EQ(ep.port, 6030);
+  }
+  {
+    SEp ep = {0};
+    char *para = "::1:7030";
+   taosGetFqdnPortFromEp(para, &ep);
+    ASSERT_EQ(strcmp(ep.fqdn, "::1"), 0);
+    ASSERT_EQ(ep.port, 7030);
+  }
+
+  {
+    SEp ep = {0};
+    char *para = "test:7030";
+   taosGetFqdnPortFromEp(para, &ep);
+    ASSERT_EQ(strcmp(ep.fqdn, "test"), 0);
+    ASSERT_EQ(ep.port, 7030);
+  }
+
+  {
+    SEp ep = {0};
+    char *para = "test";
+   taosGetFqdnPortFromEp(para, &ep);
+    ASSERT_EQ(strcmp(ep.fqdn, "test"), 0);
+    ASSERT_EQ(ep.port, 6030);
+  }
+
+  {
+    SEp ep = {0};
+    char *para = "[test]";
+   taosGetFqdnPortFromEp(para, &ep);
+    ASSERT_EQ(strcmp(ep.fqdn, "test"), 0);
+    ASSERT_EQ(ep.port, 6030);
+  }
+  {
+    SEp ep = {0};
+    char *para = "[test]:6030";
+   taosGetFqdnPortFromEp(para, &ep);
+    ASSERT_EQ(strcmp(ep.fqdn, "test"), 0);
+    ASSERT_EQ(ep.port, 6030);
+  }
+
+}
+
+TEST(testCase, function_taosTimeTruncate) {
+  int64_t ts = 1633450000000;
+  SInterval interval = {};
+  interval.timezone = NULL;
+  interval.intervalUnit = 'n';
+  interval.slidingUnit = 'n';
+  interval.offsetUnit = 0;
+  interval.precision = 0;
+  interval.interval = 11;
+  interval.sliding = 11;
+  interval.offset = 24105600000;
+  interval.timeRange.skey = INT64_MIN;
+  interval.timeRange.ekey = INT64_MAX;
+  int64_t res = taosTimeTruncate(ts, &interval);
+  ASSERT_LE(res, 1633450000000);
+}
+
+/*
+ * Test: day-interval alignment under DST timezone (America/New_York).
+ *
+ * America/New_York has two UTC offsets:
+ *   Winter (EST): UTC-5  (-18000s)
+ *   Summer (EDT): UTC-4  (-14400s)
+ *
+ * For INTERVAL(1d) TIMEZONE('America/New_York'):
+ *   - A winter timestamp should align to midnight EST  = 05:00 UTC
+ *   - A summer timestamp should align to midnight EDT  = 04:00 UTC
+ *
+ * Historical BUG being tested: taosTimeTruncate internally calls
+ * taosGetTZOffsetSeconds() which returns the offset for "now" (the
+ * current wall-clock time), not the offset for the target timestamp.
+ * So if "now" is summer, a winter timestamp gets the EDT offset,
+ * making the day boundary 04:00 UTC instead of the correct
+ * 05:00 UTC — off by 1 hour.
+ */
+#ifndef WINDOWS
+// RAII guard to restore global timezone even if test assertions fail mid-way.
+struct TzRestoreGuard {
+  ~TzRestoreGuard() { taosSetGlobalTimezone("Asia/Shanghai"); }
+};
+
+TEST(testCase, taosTimeTruncate_DST_day_interval) {
+  TzRestoreGuard tzGuard;  // restores Asia/Shanghai on scope exit
+
+  // Setup: create a timezone object for America/New_York
+  timezone_t ny = tzalloc("America/New_York");
+  ASSERT_NE(ny, nullptr);
+
+  // Set global timezone too (for consistency)
+  ASSERT_EQ(taosSetGlobalTimezone("America/New_York"), TSDB_CODE_SUCCESS);
+
+  // -- Prepare timestamps (millisecond precision, TSDB_TIME_PRECISION_MILLI=0) --
+  //
+  // Winter:  2024-01-15 15:30:00 UTC  = 2024-01-15 10:30:00 EST
+  //          epoch_ms = 1705329000000
+  //          Correct day start = 2024-01-15 00:00:00 EST = 2024-01-15 05:00:00 UTC
+  //                            = 1705294800000 ms
+  //
+  // Summer:  2024-07-15 15:30:00 UTC  = 2024-07-15 11:30:00 EDT
+  //          epoch_ms = 1721057400000
+  //          Correct day start = 2024-07-15 00:00:00 EDT = 2024-07-15 04:00:00 UTC
+  //                            = 1721016000000 ms
+
+  const int64_t winter_ts_ms         = 1705329000000LL;  // 2024-01-15 15:30:00 UTC
+  const int64_t winter_day_start_ms  = 1705294800000LL;  // 2024-01-15 05:00:00 UTC (midnight EST)
+
+  const int64_t summer_ts_ms         = 1721057400000LL;  // 2024-07-15 15:30:00 UTC
+  const int64_t summer_day_start_ms  = 1721016000000LL;  // 2024-07-15 04:00:00 UTC (midnight EDT)
+
+  // Verify expected timestamps with taosLocalTime
+  {
+    time_t t;
+    struct tm tm_val;
+
+    // Verify winter day start is indeed midnight EST
+    t = (time_t)(winter_day_start_ms / 1000);
+    ASSERT_NE(taosLocalTime(&t, &tm_val, NULL, 0, ny), nullptr);
+    ASSERT_EQ(tm_val.tm_hour, 0) << "winter day start should be midnight local";
+    ASSERT_EQ(tm_val.tm_min, 0);
+    ASSERT_EQ(tm_val.tm_sec, 0);
+    ASSERT_EQ(tm_val.tm_mon + 1, 1);   // January
+    ASSERT_EQ(tm_val.tm_mday, 15);
+
+    // Verify summer day start is indeed midnight EDT
+    t = (time_t)(summer_day_start_ms / 1000);
+    ASSERT_NE(taosLocalTime(&t, &tm_val, NULL, 0, ny), nullptr);
+    ASSERT_EQ(tm_val.tm_hour, 0) << "summer day start should be midnight local";
+    ASSERT_EQ(tm_val.tm_min, 0);
+    ASSERT_EQ(tm_val.tm_sec, 0);
+    ASSERT_EQ(tm_val.tm_mon + 1, 7);   // July
+    ASSERT_EQ(tm_val.tm_mday, 15);
+  }
+
+  // Build SInterval for INTERVAL(1d)
+  const int64_t one_day_ms = 86400LL * 1000;
+  SInterval interval = {};
+  interval.timezone     = ny;
+  interval.intervalUnit = 'd';
+  interval.slidingUnit  = 'd';
+  interval.offsetUnit   = 0;
+  interval.precision    = TSDB_TIME_PRECISION_MILLI;
+  interval.interval     = one_day_ms;
+  interval.sliding      = one_day_ms;
+  interval.offset       = 0;
+  interval.timeRange.skey = INT64_MIN;
+  interval.timeRange.ekey = INT64_MAX;
+
+  // -- Test winter timestamp --
+  int64_t winter_result = taosTimeTruncate(winter_ts_ms, &interval);
+
+  // Convert result to local time to show what we got
+  {
+    time_t t = (time_t)(winter_result / 1000);
+    struct tm tm_val;
+    taosLocalTime(&t, &tm_val, NULL, 0, ny);
+    std::cout << "Winter ts truncated to: "
+              << (1900 + tm_val.tm_year) << "-"
+              << (tm_val.tm_mon + 1) << "-" << tm_val.tm_mday
+              << " " << tm_val.tm_hour << ":" << tm_val.tm_min << ":" << tm_val.tm_sec
+              << " (epoch_ms=" << winter_result << ")" << std::endl;
+    std::cout << "Expected:              epoch_ms=" << winter_day_start_ms << std::endl;
+  }
+
+  EXPECT_EQ(winter_result, winter_day_start_ms)
+      << "Winter day boundary should be midnight EST (05:00 UTC). "
+         "If this fails, taosTimeTruncate used the current DST offset "
+         "instead of the winter offset.";
+
+  // -- Test summer timestamp --
+  int64_t summer_result = taosTimeTruncate(summer_ts_ms, &interval);
+
+  {
+    time_t t = (time_t)(summer_result / 1000);
+    struct tm tm_val;
+    taosLocalTime(&t, &tm_val, NULL, 0, ny);
+    std::cout << "Summer ts truncated to: "
+              << (1900 + tm_val.tm_year) << "-"
+              << (tm_val.tm_mon + 1) << "-" << tm_val.tm_mday
+              << " " << tm_val.tm_hour << ":" << tm_val.tm_min << ":" << tm_val.tm_sec
+              << " (epoch_ms=" << summer_result << ")" << std::endl;
+    std::cout << "Expected:               epoch_ms=" << summer_day_start_ms << std::endl;
+  }
+
+  EXPECT_EQ(summer_result, summer_day_start_ms)
+      << "Summer day boundary should be midnight EDT (04:00 UTC). "
+         "If this fails, taosTimeTruncate used the current DST offset "
+         "instead of the summer offset.";
+
+  // After the fix, BOTH seasons should align correctly.
+  bool both_correct = (winter_result == winter_day_start_ms) &&
+                      (summer_result == summer_day_start_ms);
+  ASSERT_TRUE(both_correct)
+      << "Both winter and summer day boundaries should be correct "
+         "now that taosTimeTruncate uses per-timestamp DST resolution.";
+
+  tzfree(ny);
+  // TzRestoreGuard destructor handles taosSetGlobalTimezone("Asia/Shanghai")
+}
+#endif
 
 #pragma GCC diagnostic pop

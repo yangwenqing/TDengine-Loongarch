@@ -459,8 +459,9 @@ static FORCE_INLINE void clientRecvCb(uv_stream_t* handle, ssize_t nread, const 
         }
         taosWUnLockLatch(&p->latch);
         TAOS_UNUSED(taosReleaseRef(httpRecvRefMgt, cli->recvBufRid));
+        cli->recvBufRid = 0;
       } else {
-        tWarn("http-report failed to acquire recv buf since %s", tstrerror(terrno));
+        tDebug("http-report failed to acquire recv buf since %s", tstrerror(terrno));
       }
     }
   }
@@ -570,7 +571,7 @@ static void httpHandleQuit(SHttpMsg* msg) {
 
 static bool httpFailFastShoudIgnoreMsg(SHashObj* pTable, char* server, int16_t port) {
   char buf[256] = {0};
-  sprintf(buf, "%s:%d", server, port);
+  snprintf(buf, sizeof(buf) - 1, "%s:%d", server, port);
 
   int32_t* failedTime = (int32_t*)taosHashGet(pTable, buf, strlen(buf));
   if (failedTime == NULL) {
@@ -588,7 +589,7 @@ static bool httpFailFastShoudIgnoreMsg(SHashObj* pTable, char* server, int16_t p
 static void httpFailFastMayUpdate(SHashObj* pTable, char* server, int16_t port, int8_t succ) {
   int32_t code = 0;
   char    buf[256] = {0};
-  sprintf(buf, "%s:%d", server, port);
+  snprintf(buf, sizeof(buf) - 1, "%s:%d", server, port);
 
   if (succ) {
     TAOS_UNUSED(taosHashRemove(pTable, buf, strlen(buf)));
@@ -695,7 +696,7 @@ static void httpHandleReq(SHttpMsg* msg) {
   }
 
   // set up timeout to avoid stuck;
-  int32_t fd = taosCreateSocketWithTimeout(5000);
+  int32_t fd = taosCreateSocketWithTimeout(5000, 0);
   if (fd < 0) {
     tError("http-report failed to open socket, dst:%s:%d, chanId:%" PRId64 ", seq:%" PRId64 ", reason:%s", cli->addr,
            cli->port, chanId, cli->seq, tstrerror(terrno));
@@ -939,7 +940,9 @@ int64_t taosInitHttpChan() {
 
 void taosDestroyHttpChan(int64_t chanId) {
   tDebug("http-report send quit, chanId:%" PRId64, chanId);
-
+  if (chanId < 0) {
+    return;
+  }
   int          ret = 0;
   SHttpModule* load = taosAcquireRef(httpRefMgt, chanId);
   if (load == NULL) {

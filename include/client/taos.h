@@ -72,8 +72,15 @@ typedef enum {
   TSDB_OPTION_CONNECTION_TIMEZONE,       // timezone, Same as the scope supported by the system
   TSDB_OPTION_CONNECTION_USER_IP,        // user ip
   TSDB_OPTION_CONNECTION_USER_APP,       // user app, max lengthe is 23, truncated if longer than 23
+  TSDB_OPTION_CONNECTION_CONNECTOR_INFO, // connector info, max lengthe is 255, truncated if longer than 255
   TSDB_MAX_OPTIONS_CONNECTION
 } TSDB_OPTION_CONNECTION;
+
+typedef enum {
+  TSDB_CONNECTION_INFO_USER = 0,         // name of current user
+  TSDB_CONNECTION_INFO_TOKEN,            // token name of current connection, if authenticated by token
+  TSDB_MAX_CONNECTION_INFO
+} TSDB_CONNECTION_INFO;
 
 typedef enum {
   TSDB_SML_UNKNOWN_PROTOCOL = 0,
@@ -151,9 +158,25 @@ typedef enum {
 } SET_CONF_RET_CODE;
 
 typedef enum {
+  TSDB_TOKEN_EVENT_MODIFIED = 0,
+  TSDB_TOKEN_EVENT_DROPPED,
+  TSDB_TOKEN_EVENT_DISABLED,
+  TSDB_TOKEN_EVENT_EXPIRED,
+} TOKEN_EVENT_TYPE;
+
+#define TSDB_TOKEN_NAME_LEN 32
+typedef struct {
+  int8_t      type;
+  int32_t     expireTime;  // seconds since epoch
+  char        tokenName[TSDB_TOKEN_NAME_LEN];
+} STokenEvent;
+
+typedef enum {
   TAOS_NOTIFY_PASSVER = 0,
   TAOS_NOTIFY_WHITELIST_VER = 1,
   TAOS_NOTIFY_USER_DROPPED = 2,
+  TAOS_NOTIFY_DATETIME_WHITELIST_VER = 3,
+  TAOS_NOTIFY_TOKEN = 4, // notify token event, in the callback function, [ext] is 'const STokenEvent*'
 } TAOS_NOTIFY_TYPE;
 
 /* -- implemented in the native interface, for internal component only, the API may change -- */
@@ -186,12 +209,59 @@ typedef struct TAOS_STMT_OPTIONS {
   bool    singleTableBindOnce;
 } TAOS_STMT_OPTIONS;
 
+typedef struct OPTIONS {
+  const char* keys[256];
+  const char* values[256];
+  uint16_t count;
+} OPTIONS;
+
 DLL_EXPORT int   taos_init(void);
 DLL_EXPORT void  taos_cleanup(void);
 DLL_EXPORT int   taos_options(TSDB_OPTION option, const void *arg, ...);
 DLL_EXPORT int   taos_options_connection(TAOS *taos, TSDB_OPTION_CONNECTION option, const void *arg, ...);
+DLL_EXPORT void  taos_set_option(OPTIONS *options, const char *key, const char *value);
 DLL_EXPORT TAOS *taos_connect(const char *ip, const char *user, const char *pass, const char *db, uint16_t port);
 DLL_EXPORT TAOS *taos_connect_auth(const char *ip, const char *user, const char *auth, const char *db, uint16_t port);
+DLL_EXPORT TAOS *taos_connect_with(const OPTIONS *options);
+/**
+ * taos_connect_with_dsn
+ * Note: This API is currently not supported in this client library.
+ * It may be supported in future versions. Calls will return NULL and set terrno
+ * to an appropriate "not supported" error code.
+ *
+ * @param dsn Data Source Name string (reserved for future use)
+ * @return TAOS* connection handle on success; NULL if unsupported or on error
+ */
+DLL_EXPORT TAOS *taos_connect_with_dsn(const char *dsn);
+DLL_EXPORT TAOS *taos_connect_totp(const char *ip, const char *user, const char *pass, const char* totp, const char *db, uint16_t port);
+
+/**
+ * taos_connect_test
+ * Test connection to TDengine with TOTP authentication.
+ *
+ * Return values:
+ *   0 - Success
+ *   Error codes - Failure. Unrecoverable errors (connection should be closed):
+ *     TSDB_CODE_TSC_INVALID_TOTP_CODE
+ *     TSDB_CODE_TSC_SESS_PER_USER_LIMIT
+ *     TSDB_CODE_TSC_SESS_CONN_TIMEOUT
+ *     TSDB_CODE_TSC_SESS_CONN_IDLE_TIMEOUT
+ *     TSDB_CODE_TSC_SESS_MAX_CONCURRENCY_LIMIT
+ *     TSDB_CODE_TSC_SESS_MAX_CALL_VNODE_LIMIT
+ *     TSDB_CODE_TSC_INVALID_TOKEN
+ *     TSDB_CODE_TSC_INTERNAL_ERROR
+ *   All other error codes are retryable.
+ *
+ * @param ip Server IP address
+ * @param user User name
+ * @param pass Password
+ * @param totp TOTP code
+ * @param db Database name
+ * @param port Server port
+ * @return 0 on success, error code on failure
+ */
+DLL_EXPORT int   taos_connect_test(const char *ip, const char *user, const char *pass, const char* totp, const char *db, uint16_t port);
+DLL_EXPORT TAOS *taos_connect_token(const char *ip, const char *token, const char *db, uint16_t port);
 DLL_EXPORT void  taos_close(TAOS *taos);
 
 DLL_EXPORT const char *taos_data_type(int type);
@@ -297,6 +367,7 @@ DLL_EXPORT TAOS_ROW *taos_result_block(TAOS_RES *res);
 DLL_EXPORT const char *taos_get_server_info(TAOS *taos);
 DLL_EXPORT const char *taos_get_client_info();
 DLL_EXPORT int         taos_get_current_db(TAOS *taos, char *database, int len, int *required);
+DLL_EXPORT int         taos_get_connection_info(TAOS *taos, TSDB_CONNECTION_INFO info, char* buffer, int* len);
 
 DLL_EXPORT const char *taos_errstr(TAOS_RES *res);
 DLL_EXPORT int         taos_errno(TAOS_RES *res);
@@ -321,7 +392,20 @@ DLL_EXPORT int taos_set_notify_cb(TAOS *taos, __taos_notify_fn_t fp, void *param
 /* -- implemented in the native interface, for internal component only, the API may change -- */
 typedef void (*__taos_async_whitelist_fn_t)(void *param, int code, TAOS *taos, int numOfWhiteLists,
                                             uint64_t *pWhiteLists);
+typedef void (*__taos_async_ip_whitelist_fn_t)(void *param, int code, TAOS *taos, int numOfWhiteLists, char **pWhiteLists);
+typedef __taos_async_ip_whitelist_fn_t __taos_async_whitelist_dual_stack_fn_t;
+
+// this function only fetch ipv4 whitelist
 DLL_EXPORT void taos_fetch_whitelist_a(TAOS *taos, __taos_async_whitelist_fn_t fp, void *param);
+// this function fetch dual stack( both ipv4 and ipv6 ) whitelist
+DLL_EXPORT void taos_fetch_whitelist_dual_stack_a(TAOS *taos, __taos_async_whitelist_dual_stack_fn_t fp, void *param);
+// this function fetch ip whitelist & blacklist, ipv4 and ipv6
+DLL_EXPORT void taos_fetch_ip_whitelist_a(TAOS *taos, __taos_async_ip_whitelist_fn_t fp, void *param);
+
+typedef void (*__taos_async_datetime_whitelist_fn_t)(void *param, int code, TAOS *taos, int numOfWhiteLists, char **pWhiteLists);
+// this function fetch datetime whitelist & blacklist
+DLL_EXPORT void taos_fetch_datetime_whitelist_a(TAOS *taos, __taos_async_datetime_whitelist_fn_t fp, void *param);
+
 /* ---- end ---- */
 
 typedef enum {
@@ -442,6 +526,8 @@ DLL_EXPORT void    tmq_free_raw(tmq_raw_data raw);
 // Returning null means error. Returned result need to be freed by tmq_free_json_meta
 DLL_EXPORT char *tmq_get_json_meta(TAOS_RES *res);
 DLL_EXPORT void  tmq_free_json_meta(char *jsonMeta);
+
+DLL_EXPORT int32_t taos_connect_is_alive(TAOS *taos);
 /* ---- end ---- */
 
 /* -- implemented in the native interface, for internal component only, the API may change -- */
@@ -456,6 +542,12 @@ typedef enum {
 DLL_EXPORT TSDB_SERVER_STATUS taos_check_server_status(const char *fqdn, int port, char *details, int maxlen);
 DLL_EXPORT void               taos_write_crashinfo(int signum, void *sigInfo, void *context);
 DLL_EXPORT char              *getBuildInfo();
+/* ---- end ---- */
+
+/* -- taosadapter instance management -- */
+DLL_EXPORT int32_t taos_register_instance(const char *id, const char *type, const char *desc, int32_t expire);
+DLL_EXPORT int32_t taos_list_instances(const char *filter_type, char ***pList, int32_t *pCount);
+DLL_EXPORT void    taos_free_instances(char ***pList, int32_t pCount);
 /* ---- end ---- */
 
 #ifdef __cplusplus

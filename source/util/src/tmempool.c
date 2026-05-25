@@ -66,7 +66,7 @@ void mpFreeCacheGroup(SMPCacheGroup* pGrp) {
 
 int32_t mpAddCacheGroup(SMemPool* pPool, SMPCacheGroupInfo* pInfo, SMPCacheGroup* pHead) {
   SMPCacheGroup* pGrp = NULL;
-  if (NULL == pInfo->pGrpHead) {
+  if (NULL == atomic_load_ptr(&pInfo->pGrpHead)) {
     pInfo->pGrpHead = taosMemoryCalloc(1, sizeof(*pInfo->pGrpHead));
     if (NULL == pInfo->pGrpHead) {
       uError("malloc pGrpHead failed, error:%s", tstrerror(terrno));
@@ -1202,7 +1202,7 @@ int32_t taosMemPoolOpen(char* poolName, SMemPoolCfg* cfg, void** poolHandle) {
   
   taosWUnLockLatch(&gMPMgmt.poolLock);
 
-  uInfo("mempool %s opened", poolName);
+  uInfo("memory pool %s opened", poolName);
 
 _return:
 
@@ -1236,7 +1236,7 @@ void taosMemPoolDestroySession(void* poolHandle, void* session) {
     mpDestroyPosStat(&pSession->stat.posStat);
   }
   
-  taosMemFreeClear(pSession->sessionId);
+  //taosMemFreeClear(pSession->sessionId);
 
   TAOS_MEMSET(pSession, 0, sizeof(*pSession));
 
@@ -1250,11 +1250,13 @@ int32_t taosMemPoolInitSession(void* poolHandle, void** ppSession, void* pJob, c
 
   MP_ERR_JRET(mpPopIdleNode(pPool, &pPool->sessionCache, (void**)&pSession));
 
+/*
   pSession->sessionId = taosStrdup(sessionId);
   if (NULL == pSession->sessionId) {
     uError("strdup sessionId failed, error:%s", tstrerror(terrno));
     MP_ERR_JRET(terrno);
   }
+*/
 
   TAOS_MEMCPY(&pSession->ctrl, &gMPMgmt.ctrl, sizeof(pSession->ctrl));
 
@@ -1417,7 +1419,7 @@ char *taosMemPoolStrdup(void* poolHandle, void* session, const char *ptr, char* 
 
   code = mpMalloc(pPool, pSession, &input.size, 0, &input.pMem);
   if (NULL != input.pMem) {
-    TAOS_STRCPY(input.pMem, ptr);
+    tstrncpy((char*)input.pMem, ptr, size);
     *((char*)input.pMem + size - 1) = 0;
   }
 
@@ -1782,15 +1784,15 @@ static int32_t mpUpdateReservedSize(SMemPool* pPool, int32_t newReservedSizeMB) 
   int64_t sysAvailSize = 0;
   code = taosGetSysAvailMemory(&sysAvailSize);
   if (code || sysAvailSize < MP_MIN_MEM_POOL_SIZE) {
-    uInfo("memory pool disabled since no enough system available memory, size: %" PRId64, sysAvailSize);
-    return TSDB_CODE_INVALID_PARA;
+    uInfo("failed to update reserved size since no enough system available memory, size: %" PRId64, sysAvailSize);
+    MP_ERR_RET(TSDB_CODE_QRY_MEMORY_POOL_MEMORY_NOT_ENOUGH);
   }
 
   int64_t freeSizeAfterRes = sysAvailSize - newReservedSizeMB * 1048576UL;
   if (freeSizeAfterRes < MP_MIN_FREE_SIZE_AFTER_RESERVE) {
-    uInfo("memory pool disabled since no enough system available memory after reservied, size: %" PRId64,
+    uInfo("failed to update reserved size since no enough system available memory after reservied, size: %" PRId64,
           freeSizeAfterRes);
-    return TSDB_CODE_INVALID_PARA;
+    MP_ERR_RET(TSDB_CODE_QRY_MEMORY_POOL_MEMORY_NOT_ENOUGH);
   }
 
   MP_LOCK(MP_WRITE, &pPool->cfgLock);
@@ -1805,10 +1807,14 @@ int32_t taosMemoryPoolCfgUpdateReservedSize(int32_t newReservedSizeMB) {
     return TSDB_CODE_SUCCESS;
   }
   int32_t code = TSDB_CODE_SUCCESS;
-  if (NULL == gMemPoolHandle || newReservedSizeMB < 0) {
-    uError("%s invalid input param, poolHandle:%p, newReservedSizeMB:%d", __FUNCTION__, gMemPoolHandle,
-           newReservedSizeMB);
+  if (NULL == gMemPoolHandle) {
+    uError("failed to update reserved size since memory pool not initialized");
+    MP_ERR_RET(TSDB_CODE_QRY_MEMORY_POOL_NOT_INITIALIZED);
+  }
+  if (newReservedSizeMB < 0) {
+    uError("failed to update reserved size since newReservedSizeMB:%d is invalid", newReservedSizeMB);
     MP_ERR_RET(TSDB_CODE_INVALID_PARA);
   }
+
   return mpUpdateReservedSize(gMemPoolHandle, newReservedSizeMB);
 }

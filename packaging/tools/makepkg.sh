@@ -72,24 +72,26 @@ else
   if [ "$verMode" == "cloud" ]; then
     taostools_bin_files=" ${build_dir}/bin/taosBenchmark"
   else
-    wget https://github.com/taosdata/grafanaplugin/releases/latest/download/TDinsight.sh -O ${build_dir}/bin/TDinsight.sh \
-      && echo "TDinsight.sh downloaded!" \
-      || echo "failed to download TDinsight.sh"
-    # download TDinsight caches
-    orig_pwd=$(pwd)
-    tdinsight_caches=""
-    cd ${build_dir}/bin/ && \
-      chmod +x TDinsight.sh
-    ./TDinsight.sh --download-only ||:
-    #  tdinsight_caches=$(./TDinsight.sh --download-only | xargs -I printf "${build_dir}/bin/{} ")
-    cd $orig_pwd
-    echo "TDinsight caches: $tdinsight_caches"
+    # wget https://github.com/taosdata/grafanaplugin/releases/latest/download/TDinsight.sh -O ${build_dir}/bin/TDinsight.sh \
+    #   && echo "TDinsight.sh downloaded!" \
+    #   || echo "failed to download TDinsight.sh"
+    # # download TDinsight caches
+    # orig_pwd=$(pwd)
+    # tdinsight_caches=""
+    # cd ${build_dir}/bin/ && \
+    #   chmod +x TDinsight.sh
+    # ./TDinsight.sh --download-only ||:
+    # #  tdinsight_caches=$(./TDinsight.sh --download-only | xargs -I printf "${build_dir}/bin/{} ")
+    # cd $orig_pwd
+    # echo "TDinsight caches: $tdinsight_caches"
 
-    taostools_bin_files=" ${build_dir}/bin/taosdump \
-      ${build_dir}/bin/taosBenchmark \
-      ${build_dir}/bin/TDinsight.sh \
-      ${build_dir}/bin/tdengine-datasource.zip \
-      ${build_dir}/bin/tdengine-datasource.zip.md5"
+    # taostools_bin_files=" ${build_dir}/bin/taosdump \
+    #   ${build_dir}/bin/taosBenchmark \
+    #   ${build_dir}/bin/TDinsight.sh \
+    #   ${build_dir}/bin/tdengine-datasource.zip \
+    #   ${build_dir}/bin/tdengine-datasource.zip.md5"
+    # taostools only includes taosBenchmark and taosdump, as the branch is intended solely for full_long_time_test and will not be actively maintained
+    taostools_bin_files="${build_dir}/bin/taosBenchmark ${build_dir}/bin/taosdump"
   fi
 
 
@@ -99,6 +101,7 @@ else
       ${build_dir}/bin/${clientName}adapter \
       ${build_dir}/bin/${clientName}keeper \
       ${build_dir}/bin/taosudf \
+      ${build_dir}/bin/taosmqtt \
       ${script_dir}/remove.sh \
       ${script_dir}/set_core.sh \
       ${script_dir}/startPre.sh \
@@ -107,13 +110,21 @@ else
 fi
 
 if [ "$osType" == "Darwin" ]; then
-    lib_files="${build_dir}/lib/libtaos.${version}.dylib"
-    nativelib_files="${build_dir}/lib/libtaosnative.${version}.dylib"
+    lib_files="${build_dir}/lib/libtaos.dylib"
+    nativelib_files="${build_dir}/lib/libtaosnative.dylib"
     wslib_files="${build_dir}/lib/libtaosws.dylib"
+
+    pkg_lib_files="libtaos.${version}.dylib"
+    pkg_nativelib_files="libtaosnative.${version}.dylib"
+    pkg_wslib_files="libtaosws.${version}.dylib"
 else
-    lib_files="${build_dir}/lib/libtaos.so.${version}"
-    nativelib_files="${build_dir}/lib/libtaosnative.so.${version}"
+    lib_files="${build_dir}/lib/libtaos.so"
+    nativelib_files="${build_dir}/lib/libtaosnative.so"
     wslib_files="${build_dir}/lib/libtaosws.so"
+
+    pkg_lib_files="libtaos.so.${version}"
+    pkg_nativelib_files="libtaosnative.so.${version}"
+    pkg_wslib_files="libtaosws.so.${version}"
 fi
 header_files="${code_dir}/include/client/taos.h ${code_dir}/include/common/taosdef.h ${code_dir}/include/util/taoserror.h ${code_dir}/include/util/tdef.h ${code_dir}/include/libs/function/taosudf.h"
 
@@ -250,19 +261,14 @@ if [ "$verMode" == "cloud" ]; then
   mv remove_temp.sh ${install_dir}/bin/remove.sh
 fi
 
-cd ${install_dir}
-if [ "$osType" != "Darwin" ]; then
-    tar -zcv -f ${tarName} * --remove-files || :
-    ls ${install_dir}
-else
-    tar -zcv -f ${tarName} * || :
-fi
-
-exitcode=$?
-if [ "$exitcode" != "0" ]; then
+cd ${release_dir}
+rm -f "${tarName}"
+if ! tar -zcv -f "${tarName}" -C "${install_dir}" --exclude="./${tarName}" .; then
   echo "tar ${tarName} error !!!"
-  exit $exitcode
+  exit 1
 fi
+find "${install_dir}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+mv -f "${tarName}" "${install_dir}/${tarName}"
 
 cd ${curr_dir}
 cp ${install_files} ${install_dir}
@@ -334,8 +340,11 @@ if [[ $dbName == "taos" ]]; then
 fi
 
 # Copy driver
-mkdir -p ${install_dir}/driver && cp ${lib_files} ${install_dir}/driver && cp ${nativelib_files} ${install_dir}/driver && echo "${versionComp}" >${install_dir}/driver/vercomp.txt
-[ -f ${wslib_files} ] && cp ${wslib_files} ${install_dir}/driver || :
+mkdir -p ${install_dir}/driver
+cp ${lib_files}       ${install_dir}/driver/${pkg_lib_files} 
+cp ${nativelib_files} ${install_dir}/driver/${pkg_nativelib_files} 
+echo "${versionComp}" >${install_dir}/driver/vercomp.txt 
+cp ${wslib_files}     ${install_dir}/driver/${pkg_wslib_files} || :
 
 # Copy connector && taosx
 if [ "$verMode" == "cluster" ]; then    
@@ -348,7 +357,7 @@ if [ "$verMode" == "cluster" ]; then
           	git clone -b main --depth=1 https://github.com/taosdata/taos-connector-jdbc.git ||:
     	  fi
     	  cd taos-connector-jdbc
-    	  mvn clean package -Dmaven.test.skip=true
+    	  mvn clean package -DskipTests -DskipITs=true
     	  echo  ${build_dir}/lib/
     	  cp target/*.jar  ${build_dir}/lib/
     	  cd ${install_dir}/connector
@@ -373,7 +382,7 @@ if [ "$verMode" == "cluster" ]; then
 
         # copy taosx
         if [ -d ${top_dir}/../enterprise/src/plugins/taosx/release/${clientName2}x ]; then
-          cp -r ${top_dir}/../enterprise/src/plugins/taosx/release/${clientName2}x ${install_dir}          
+          cp -r ${top_dir}/../enterprise/src/plugins/taosx/release/${clientName2}x ${install_dir}
           cp ${top_dir}/../enterprise/src/plugins/taosx/packaging/uninstall.sh ${install_dir}/${clientName2}x/uninstall_${clientName2}x.sh
           sed -i "s/uninstall.sh/uninstall_${clientName2}x.sh/g" ${install_dir}/${clientName2}x/uninstall_${clientName2}x.sh
           sed -i "s/PREFIX=\"taos\"/PREFIX=\"${clientName2}\"/g" ${install_dir}/${clientName2}x/uninstall_${clientName2}x.sh
@@ -419,18 +428,15 @@ if [ "$pagMode" == "lite" ]; then
 fi
 
 
-if [ "$osType" != "Darwin" ]; then
-    tar -zcv -f "$(basename ${pkg_name}).tar.gz" "$(basename ${install_dir})" --remove-files || :
-else
-    tar -zcv -f "$(basename ${pkg_name}).tar.gz" "$(basename ${install_dir})" || :
-    rm -rf ${install_dir} ||:
-    ([ -d build-taoskeeper ] && rm -rf build-taoskeeper ) ||:
+final_pkg_name="$(basename "${pkg_name}").tar.gz"
+rm -f "${final_pkg_name}"
+if ! tar -zcv -f "${final_pkg_name}" "$(basename "${install_dir}")"; then
+  echo "tar ${final_pkg_name} error !!!"
+  exit 1
 fi
-
-exitcode=$?
-if [ "$exitcode" != "0" ]; then
-  echo "tar ${pkg_name}.tar.gz error !!!"
-  exit $exitcode
+[ -n "${install_dir}" ] && [ "${install_dir}" != "/" ] && rm -rf "${install_dir}"
+if [ "$osType" == "Darwin" ]; then
+  [ -d build-taoskeeper ] && rm -rf build-taoskeeper ||:
 fi
 
 # if [ -n "${taostools_bin_files}" ] && [ "$verMode" != "cloud" ]; then

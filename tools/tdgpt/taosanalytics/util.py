@@ -1,28 +1,35 @@
 # encoding:utf-8
 """utility methods to helper query processing"""
+import argparse
+import math
+import re
+
 import numpy as np
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.tsa.stattools import adfuller
 
-from taosanalytics.conf import app_logger
+from taosanalytics.log import AppLogger
+from taosanalytics.error import white_noise_error_msg
+
+SINGLE_COLUMN_ERROR_MSG = 'only one column provided, more columns are expected'
 
 
-def validate_pay_load(json_obj):
+def validate_pay_load(json_obj, check_rows=True):
     """ validate the input payload """
     if "data" not in json_obj:
-        raise ValueError('data attr does not exist in json')
+        raise ValueError('"data" does not exist in request json')
 
     data = json_obj["data"]
 
     if len(data) <= 1:
-        raise ValueError('only one column, primary timestamp column should be provided')
+        raise ValueError(SINGLE_COLUMN_ERROR_MSG)
 
     rows = len(data[0])
 
     if rows != len(data[1]):
-        raise ValueError('data inconsistent, number of rows are not identical')
+        raise ValueError('data inconsistent, number of rows in different columns are not identical')
 
-    if rows < 10 or rows > 40000:
+    if check_rows and (rows < 10 or rows > 40000):
         raise ValueError(f'number of rows should between 10 and 40000, actual {rows} rows')
 
     if "schema" not in json_obj:
@@ -36,30 +43,40 @@ def validate_pay_load(json_obj):
 def convert_results_to_windows(result, ts_list, valid_code):
     """generate the window according to anomaly detection result"""
     skey, ekey = -1, -1
+    mask = math.nan
+
     wins = []
+    mask_list = []
 
     if ts_list is None or result is None or len(result) != len(ts_list):
         return wins
 
     for index, val in enumerate(result):
         if val != valid_code:
-            ekey = ts_list[index]
-            if skey == -1:
-                skey = ts_list[index]
+            if val == mask or math.isnan(mask):
+                ekey = ts_list[index]
+                if skey == -1:
+                    skey, mask = ts_list[index], val
+            else:
+                wins.append([skey, ekey])
+                mask_list.append(mask)
+                skey, ekey, mask = ts_list[index], ts_list[index], val
         else:
             if ekey != -1:
                 wins.append([skey, ekey])
-                skey, ekey = -1, -1
+                mask_list.append(mask)
+                skey, ekey, mask = -1, -1, math.nan
 
     if ekey != -1:
         wins.append([skey, ekey])
+        mask_list.append(mask)
 
-    return wins
+    return wins, mask_list
 
 
 def is_white_noise(input_list):
     """ determine whether the input list is a white noise list or not """
-    if len(input_list) < 16:  # the number of items in the list is insufficient
+    if len(input_list) <= 16:  # the number of items in the list is insufficient
         return False
 
     res = acorr_ljungbox(input_list, lags=[6, 12, 16], boxpierce=True, return_df=True)
@@ -70,7 +87,7 @@ def is_white_noise(input_list):
 def is_stationary(input_list):
     """ determine whether the input list is weak stationary or not """
     adf, pvalue, usedlag, nobs, critical_values, _ = adfuller(input_list, autolag='AIC')
-    app_logger.log_inst.info("adf is:%f critical value is:%s" % (adf, critical_values))
+    AppLogger.info("adf is:%f critical value is:%s", adf, critical_values)
     return pvalue < 0.05
 
 
@@ -106,6 +123,7 @@ def get_data_index(schema):
 
     return -1
 
+
 def get_past_dynamic_data(data, schema):
     past_dynamic = []
 
@@ -115,6 +133,7 @@ def get_past_dynamic_data(data, schema):
 
     return None if len(past_dynamic) == 0 else past_dynamic
 
+
 def get_dynamic_data(data, schema):
     dynamic = []
 
@@ -123,6 +142,16 @@ def get_dynamic_data(data, schema):
             dynamic.append(data[index])
 
     return None if len(dynamic) == 0 else dynamic
+
+
+def get_more_data_list(data, schema, name='val1'):
+    second_list = []
+
+    for index, val in enumerate(schema):
+        if val[0] == name:
+            second_list = data[index]
+
+    return None if len(second_list) == 0 else second_list
 
 
 def get_ts_index(schema):
@@ -139,3 +168,73 @@ def create_sequences(values, time_steps):
     for i in range(len(values) - time_steps + 1):
         output.append(values[i: (i + time_steps)])
     return np.stack(output)
+
+
+def do_initial_check(request):
+    if not request.is_json:
+        AppLogger.error('recv invalid request, only json allowed. %s', request.data)
+        raise ValueError("invalid request format")
+
+    try:
+        req_json = request.json
+    except Exception as e:
+        AppLogger.error('recv invalid request, invalid json format:%s', request.data)
+        raise
+
+    AppLogger.debug('req payload: %s', req_json)
+    return req_json
+
+
+def do_check_before_exec(request, check_rows=True):
+    req_json = do_initial_check(request)
+
+    # 1. validate the input data in json format
+    try:
+        validate_pay_load(req_json, check_rows)
+    except ValueError as e:
+        AppLogger.error('validate req json failed, %s', e)
+        raise
+
+    payload = req_json["data"]
+
+    # 2. white noise data check
+    wn_check = req_json["wncheck"] if "wncheck" in req_json else 1
+    data_index = get_data_index(req_json["schema"])
+    ts_index = get_ts_index(req_json["schema"])
+
+    if data_index == -1:
+        raise ValueError("failed to find the data attribute in the payload, data index: %s", data_index)
+
+    if wn_check:
+        data = payload[data_index]
+        try:
+            is_wn = is_white_noise(data)
+        except Exception as e:
+            AppLogger.error("failed to check white noise data, %s", str(e))
+            raise
+
+        if is_wn:
+            AppLogger.debug("%s is %s", data, white_noise_error_msg())
+            raise ValueError(white_noise_error_msg())
+
+    options = req_json["option"] if "option" in req_json else None
+
+    return req_json, payload, options, data_index, ts_index
+
+
+def parse_time_delta_string(time_str: str):
+    match = re.match(r'^(\d*)([smhdw]|ns|ms|us)$', time_str.lower())
+    if not match:
+        raise ValueError(f"failed to parse time string: {time_str}")
+
+    value = int(match.group(1)) if len(match.group(1)) > 0 else 1
+    unit = match.group(2)
+    return value, unit
+
+
+def parse_args():
+    """Parse command line arguments (only used when running directly with python)"""
+    parser = argparse.ArgumentParser(description='TDgpt analytics service')
+    parser.add_argument('-c', '--config', dest='conf_path', default=None,
+                        help='path to configuration file')
+    return parser.parse_args()

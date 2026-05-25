@@ -32,8 +32,6 @@ int tdbTbOpen(const char *tbname, int keyLen, int valLen, tdb_cmpr_fn_t keyCmprF
   char    fFullName[TDB_FILENAME_LEN];
   SPage  *pPage;
   SPgno   pgno;
-  void   *pKey = NULL;
-  int     nKey = 0;
   void   *pData = NULL;
   int     nData = 0;
 
@@ -63,8 +61,6 @@ int tdbTbOpen(const char *tbname, int keyLen, int valLen, tdb_cmpr_fn_t keyCmprF
       pgno = 0;
     } else {
       pgno = *(SPgno *)pData;
-
-      tdbFree(pKey);
       tdbFree(pData);
     }
 
@@ -225,6 +221,20 @@ int tdbTbPGet(TTB *pTb, const void *pKey, int kLen, void **ppKey, int *pkLen, vo
   return tdbBtreePGet(pTb->pBt, pKey, kLen, ppKey, pkLen, ppVal, vLen);
 }
 
+// tdbTbBtreeToStack, tdbTbPushFreePage, tdbTbPopFreePage are only for free page management,
+// they are using the b-tree as a stack, never call them for other purpose
+int tdbTbBtreeToStack(TTB *pTb) {
+  return tdbBtreeToStack(pTb->pBt);
+}
+
+int tdbTbPushFreePage(TTB *pTb, SPage* pPage, TXN *pTxn) {
+  return tdbBtreePushFreePage(pTb->pBt, pPage, pTxn);
+}
+
+int tdbTbPopFreePage(TTB *pTb, SPgno* pgno, TXN *pTxn) {
+  return tdbBtreePopFreePage(pTb->pBt, pgno, pTxn);
+}
+
 int tdbTbcOpen(TTB *pTb, TBC **ppTbc, TXN *pTxn) {
   int  ret;
   TBC *pTbc = NULL;
@@ -236,7 +246,7 @@ int tdbTbcOpen(TTB *pTb, TBC **ppTbc, TXN *pTxn) {
   }
 
   if ((ret = tdbBtcOpen(&pTbc->btc, pTb->pBt, pTxn)) != 0) {
-    taosMemoryFree(pTbc);
+    tdbOsFree(pTbc);
     return ret;
   }
 

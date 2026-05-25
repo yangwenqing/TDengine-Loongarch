@@ -14,10 +14,11 @@
  */
 
 #include "transComm.h"
+#include "transTLS.h"
 
 #ifndef TD_ASTRA_RPC
-void* (*taosInitHandle[])(uint32_t ip, uint32_t port, char* label, int32_t numOfThreads, void* fp, void* pInit) = {
-    transInitServer, transInitClient};
+void* (*taosInitHandle[])(SIpAddr* addr, char* label, int32_t numOfThreads, void* fp, void* pInit) = {transInitServer,
+                                                                                                      transInitClient};
 
 void (*taosCloseHandle[])(void* arg) = {transCloseServer, transCloseClient};
 
@@ -26,8 +27,8 @@ void (*taosUnRefHandle[])(void* handle) = {transUnrefSrvHandle, NULL};
 
 int (*transReleaseHandle[])(void* handle, int32_t status) = {transReleaseSrvHandle, transReleaseCliHandle};
 
-static int32_t transValidLocalFqdn(const char* localFqdn, uint32_t* ip) {
-  int32_t code = taosGetIpv4FromFqdn(localFqdn, ip);
+static int32_t transValidLocalFqdn(const char* localFqdn, SIpAddr* addr) {
+  int32_t code = taosGetIpFromFqdn(tsEnableIpv6, localFqdn, addr);
   if (code != 0) {
     return TSDB_CODE_RPC_FQDN_ERROR;
   }
@@ -44,12 +45,12 @@ void* rpcOpen(const SRpcInit* pInit) {
     TAOS_CHECK_GOTO(terrno, NULL, _end);
   }
 
-  pRpc->startReadTimer = pInit->startReadTimer;
   if (pInit->label) {
     int len = strlen(pInit->label) > sizeof(pRpc->label) ? sizeof(pRpc->label) : strlen(pInit->label);
     memcpy(pRpc->label, pInit->label, len);
   }
 
+  pRpc->startReadTimer = pInit->startReadTimer;
   pRpc->compressSize = pInit->compressSize;
   if (pRpc->compressSize < 0) {
     pRpc->compressSize = -1;
@@ -95,13 +96,14 @@ void* rpcOpen(const SRpcInit* pInit) {
     pRpc->numOfThreads = 1;
   }
 
-  uint32_t ip = 0;
+  SIpAddr addr = {0};
   if (pInit->connType == TAOS_CONN_SERVER) {
-    if ((code = transValidLocalFqdn(pInit->localFqdn, &ip)) != 0) {
+    if ((code = transValidLocalFqdn(pInit->localFqdn, &addr)) != 0) {
       tError("invalid fqdn:%s, errmsg:%s", pInit->localFqdn, tstrerror(code));
       TAOS_CHECK_GOTO(code, NULL, _end);
     }
   }
+  addr.port = pInit->localPort;
 
   pRpc->connType = pInit->connType;
   pRpc->idleTime = pInit->idleTime;
@@ -109,27 +111,80 @@ void* rpcOpen(const SRpcInit* pInit) {
   if (pInit->user) {
     tstrncpy(pRpc->user, pInit->user, sizeof(pRpc->user));
   }
+
+  if (pInit->isToken && pInit->user) {
+    tstrncpy(pRpc->identifier, pInit->user, sizeof(pRpc->identifier));
+    pRpc->isToken = 1;
+  }
+
   pRpc->timeToGetConn = pInit->timeToGetConn;
   if (pRpc->timeToGetConn == 0) {
     pRpc->timeToGetConn = 10 * 1000;
   }
   pRpc->notWaitAvaliableConn = pInit->notWaitAvaliableConn;
+  pRpc->ipv6 = pInit->ipv6;
 
-  pRpc->tcphandle =
-      (*taosInitHandle[pRpc->connType])(ip, pInit->localPort, pRpc->label, pRpc->numOfThreads, NULL, pRpc);
+
+  code = transTlsCxtMgtInit((STlsCxtMgt **)&pRpc->pTlsMgt); 
+  TAOS_CHECK_GOTO(code, NULL, _end);
+
+  if (pInit->enableSSL == 1) {
+    SSslCtx* pCxt = NULL;
+    code = transTlsCxtCreate(pInit, (SSslCtx**)&pCxt);
+    TAOS_CHECK_GOTO(code, NULL, _end);
+
+    if (pCxt == NULL) {
+      tError("Failed to create SSL context for %s", pRpc->label);
+      TAOS_CHECK_GOTO(TSDB_CODE_THIRDPARTY_ERROR, NULL, _end);
+    }
+
+    code = transTlsCxtMgtAppend((STlsCxtMgt*)pRpc->pTlsMgt, pCxt);
+    TAOS_CHECK_GOTO(code, NULL, _end);
+
+
+    tInfo("TLS is enabled for %s", pRpc->label);
+    pRpc->enableSSL = 1;
+  } else {
+    tInfo("TLS is not enabled for %s", pRpc->label);
+    pRpc->enableSSL = 0;
+  }
+
+  pRpc->enableSasl = pInit->enableSasl;
+
+  if (pRpc->enableSasl) {
+    tInfo("SASL is enabled for %s", pRpc->label);
+    if (!pRpc->enableSSL) {
+      tWarn("Enabling SASL without TLS may expose sensitive information for %s", pRpc->label);
+      TAOS_CHECK_GOTO(TSDB_CODE_THIRDPARTY_ERROR, NULL, _end);
+    }
+  } else {
+    tInfo("SASL is not enabled for %s", pRpc->label);
+  }
+
+  pRpc->tcphandle = (*taosInitHandle[pRpc->connType])(&addr, pRpc->label, pRpc->numOfThreads, NULL, pRpc);
 
   if (pRpc->tcphandle == NULL) {
     tError("failed to init rpc handle");
     TAOS_CHECK_GOTO(terrno, NULL, _end);
   }
+  pRpc->shareConn = pInit->shareConn;
 
   int64_t refId = transAddExHandle(transGetInstMgt(), pRpc);
-  void*   tmp = transAcquireExHandle(transGetInstMgt(), refId);
+  TAOS_UNUSED(transAcquireExHandle(transGetInstMgt(), refId));
+
+  code = transCachePut(refId, (STrans*)pRpc);
+  TAOS_CHECK_GOTO(code, NULL, _end);
+
   pRpc->refId = refId;
 
-  pRpc->shareConn = pInit->shareConn;
   return (void*)refId;
 _end:
+  if (pRpc->pTlsMgt) {
+    transTlsCxtMgtDestroy((STlsCxtMgt*)pRpc->pTlsMgt);
+  }
+  // if (pRpc->pSSLContext) {
+  //   transTlsCtxDestroy((SSslCtx*)pRpc->pSSLContext);
+  // }
   taosMemoryFree(pRpc);
   terrno = code;
 
@@ -140,6 +195,7 @@ void rpcClose(void* arg) {
   if (arg == NULL) {
     return;
   }
+  transCacheRemoveByRefId((int64_t)arg);
   transRemoveExHandle(transGetInstMgt(), (int64_t)arg);
   transReleaseExHandle(transGetInstMgt(), (int64_t)arg);
   tInfo("end to close rpc");
@@ -151,11 +207,20 @@ void rpcCloseImpl(void* arg) {
   if (pRpc->tcphandle != NULL) {
     (*taosCloseHandle[pRpc->connType])(pRpc->tcphandle);
   }
+
+  transTlsCxtMgtDestroy((STlsCxtMgt*)pRpc->pTlsMgt);
+
   taosMemoryFree(pRpc);
 }
 
 void* rpcMallocCont(int64_t contLen) {
   int64_t size = contLen + TRANS_MSG_OVERHEAD;
+  if (size >= TRANS_PACKET_LIMIT) {
+    tError("failed to malloc msg, size:%" PRId64 " exceeds limit:%d", size, TRANS_PACKET_LIMIT);
+    terrno = TSDB_CODE_OUT_OF_MEMORY;
+    return NULL;
+  }
+
   char*   start = taosMemoryCalloc(1, size);
   if (start == NULL) {
     tError("failed to malloc msg, size:%" PRId64, size);
@@ -229,10 +294,15 @@ int32_t rpcSetDefaultAddr(void* thandle, const char* ip, const char* fqdn) {
 // server only
 int32_t rpcSetIpWhite(void* thandle, void* arg) { return transSetIpWhiteList(thandle, arg, NULL); }
 
+int32_t rpcSetTimeIpWhite(void* thandle, void* arg) { return transSetTimeIpWhiteList(thandle, arg, NULL); }
+int32_t rpcReloadTlsConfig(void* handle, int8_t type) { return transReloadTlsConfig(handle, type); }
+
 int32_t rpcAllocHandle(int64_t* refId) { return transAllocHandle(refId); }
 
-int32_t rpcUtilSIpRangeToStr(SIpV4Range* pRange, char* buf) { return transUtilSIpRangeToStr(pRange, buf); }
-int32_t rpcUtilSWhiteListToStr(SIpWhiteList* pWhiteList, char** ppBuf) {
+int32_t rpcUtilSIpRangeToStr(SIpV4Range* pRange, char* buf, int32_t cap) {
+  return transUtilSIpRangeToStr(pRange, buf, cap);
+}
+int32_t rpcUtilSWhiteListToStr(SIpWhiteListDual* pWhiteList, char** ppBuf) {
   return transUtilSWhiteListToStr(pWhiteList, ppBuf);
 }
 
@@ -264,7 +334,7 @@ void (*taosCloseHandle[])(void* arg) = {transCloseServer, transCloseClient};
 int (*transReleaseHandle[])(void* handle) = {transReleaseSrvHandle, transReleaseCliHandle};
 #endif
 
-static int32_t transValidLocalFqdn(const char* localFqdn, uint32_t* ip) { return 0; }
+static int32_t transValidLocalFqdn(const char* localFqdn, SIpAddr* ip) { return 0; }
 typedef struct {
   char*    lablset;
   RPC_TYPE type;
@@ -329,8 +399,8 @@ void* rpcOpen(const SRpcInit* pInit) {
     pRpc->numOfThreads = 1;
   }
 
-  uint32_t ip = 0;
   if (pInit->connType == TAOS_CONN_SERVER) {
+    SIpAddr addr = {0};
     if ((code = transValidLocalFqdn(pInit->localFqdn, &ip)) != 0) {
       tError("invalid fqdn:%s, errmsg:%s", pInit->localFqdn, tstrerror(code));
       TAOS_CHECK_GOTO(code, NULL, _end);
@@ -342,6 +412,11 @@ void* rpcOpen(const SRpcInit* pInit) {
   pRpc->parent = pInit->parent;
   if (pInit->user) {
     tstrncpy(pRpc->user, pInit->user, sizeof(pRpc->user));
+  }
+
+  if (pInit->isToken && pInit->user) {
+    tstrncpy(pRpc->identifier, pInit->user, sizeof(pRpc->identifier));
+    pRpc->isToken = 1;
   }
   pRpc->timeToGetConn = pInit->timeToGetConn;
   if (pRpc->timeToGetConn == 0) {
@@ -535,7 +610,9 @@ int32_t rpcSetIpWhite(void* thandle, void* arg) {
 
 int32_t rpcAllocHandle(int64_t* refId) { return transAllocHandle(refId); }
 
-int32_t rpcUtilSIpRangeToStr(SIpV4Range* pRange, char* buf) { return transUtilSIpRangeToStr(pRange, buf); }
+int32_t rpcUtilSIpRangeToStr(SIpV4Range* pRange, char* buf, int32_t cap) {
+  return transUtilSIpRangeToStr(pRange, buf, cap);
+}
 int32_t rpcUtilSWhiteListToStr(SIpWhiteList* pWhiteList, char** ppBuf) {
   return transUtilSWhiteListToStr(pWhiteList, ppBuf);
 }

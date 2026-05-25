@@ -19,7 +19,7 @@
 #include "tlog.h"
 #include "tutil.h"
 
-#define TSDB_REF_OBJECTS        100
+#define TSDB_REF_OBJECTS        2000
 #define TSDB_REF_STATE_EMPTY    0
 #define TSDB_REF_STATE_ACTIVE   1
 #define TSDB_REF_STATE_DELETED  2
@@ -137,6 +137,29 @@ void taosCloseRef(int32_t rsetId) {
   if (deleted) taosDecRsetCount(pSet);
 }
 
+int32_t taosGetRefSetCount(int32_t rsetId, int32_t *pCount) {
+  SRefSet *pSet;
+
+  if (pCount == NULL) {
+    return terrno = TSDB_CODE_INVALID_PARA;
+  }
+
+  if (rsetId < 0 || rsetId >= TSDB_REF_OBJECTS) {
+    uTrace("rsetId:%d, failed to get state/count, out of range", rsetId);
+    return terrno = TSDB_CODE_REF_INVALID_ID;
+  }
+
+  (void)taosThreadOnce(&tsRefModuleInit, taosInitRefModule);
+
+  pSet = tsRefSetList + rsetId;
+
+  (void)taosThreadMutexLock(&tsRefMutex);
+  *pCount = atomic_load_32(&pSet->count);
+  (void)taosThreadMutexUnlock(&tsRefMutex);
+
+  return TSDB_CODE_SUCCESS;
+}
+
 int64_t taosAddRef(int32_t rsetId, void *p) {
   int32_t   hash;
   SRefNode *pNode;
@@ -227,9 +250,9 @@ void *taosAcquireRef(int32_t rsetId, int64_t rid) {
     iter++;
     pNode = pNode->next;
   }
-
-  if (iter >= TSDB_REF_ITER_THRESHOLD) {
-    uWarn("rid:0x%" PRIx64 ", iter:%d, rsetId:%d", rid, iter, rsetId);
+ 
+ if (iter >= TSDB_REF_ITER_THRESHOLD) {
+    uWarn("rsetId:%d rid:%" PRId64 " iter:%d", rsetId, rid, iter);
   }
 
   if (pNode) {
@@ -477,6 +500,7 @@ static void taosLockList(int64_t *lockedBy) {
     if (++i % 100 == 0) {
       (void)sched_yield();
     }
+
   }
 }
 

@@ -16,6 +16,7 @@ target_include_directories(
     "${TD_SOURCE_DIR}/include/util"
     "${TD_SOURCE_DIR}/include/common"
     "${TD_SOURCE_DIR}/include/client"
+    "${TD_SOURCE_DIR}/include/libs/crypt"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/inc"
 )
 
@@ -29,15 +30,16 @@ target_link_libraries(
     PRIVATE scalar
     PRIVATE geometry
     PRIVATE decimal
+    PRIVATE crypt
     PUBLIC transport
 )
 
 # SET(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/build/bin)
 
-if(${BUILD_WITH_UDF})
+if(BUILD_WITH_UDF)
 add_executable(taosudf src/udfd.c)
 
-if(${TD_DARWIN})
+if(TD_DARWIN)
     target_compile_options(taosudf PRIVATE -Wno-error=deprecated-non-prototype)
 endif()
 
@@ -49,13 +51,23 @@ target_include_directories(
     "${TD_SOURCE_DIR}/include/common"
     "${TD_SOURCE_DIR}/include/libs/transport"
     "${TD_SOURCE_DIR}/include/client"
+    "${TD_SOURCE_DIR}/include/dnode/mgmt"
+    "${TD_SOURCE_DIR}/source/dnode/mgmt/node_util/inc"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/inc"
 )
 
 target_link_libraries(
     taosudf
-    PRIVATE os util common nodes function
+    PRIVATE os util common nodes function dnode
 )
+
+if(NOT TD_WINDOWS)
+    set_target_properties(taosudf PROPERTIES
+        INSTALL_RPATH "$ORIGIN:$ORIGIN/../lib:$ORIGIN/../driver"
+        BUILD_WITH_INSTALL_RPATH TRUE
+        SKIP_BUILD_RPATH FALSE
+    )
+endif()
 
 if(UNIX AND NOT APPLE)
     # ref: https://cmake.org/cmake/help/latest/release/3.4.html#deprecated-and-removed-features
@@ -64,8 +76,8 @@ if(UNIX AND NOT APPLE)
     )
 endif()
 
-if(${BUILD_TEST})
+if(BUILD_TEST)
     add_subdirectory(test)
 endif()
 
-endif(${BUILD_WITH_UDF})
+endif()

@@ -4,6 +4,7 @@
 #include <taos.h>
 #include <taoserror.h>
 #include <toolsdef.h>
+#include "tdef.h"
 #include "dump.h"
 
 //
@@ -15,6 +16,9 @@
 #define TSDB_CODE_RPC_END                       TSDB_CODE_RPC_ASYNC_MODULE_QUIT
 
 // websocket can retry code range
+#define TSDB_CODE_WBS_NETWORK_BEGIN             TAOS_DEF_ERROR_CODE(0, 0xE001)
+#define TSDB_CODE_WBS_NETWORK_END               TAOS_DEF_ERROR_CODE(0, 0xE0FF)
+
 // range1 [0x0001~0x00FF]
 #define WEBSOCKET_CODE_BEGIN1      0x0001
 #define WEBSOCKET_CODE_END1        0x00FF
@@ -29,14 +33,11 @@
 #define RETRY_TYPE_QUERY   1
 #define RETRY_TYPE_FETCH   2
 
-//come from TDengine util/tdef.h
-#define TSDB_TABLE_NAME_LEN           193                                // it is a null-terminated string
-
 //
 // ------------- struct define ----------
 //
 
-// single link 
+// single link
 typedef struct SNode {
     char name[TSDB_TABLE_NAME_LEN];
     struct SNode *next;
@@ -54,7 +55,7 @@ json_t *load_json(char *jsonbuf);
 void print_json_aux(json_t *element, int indent);
 const char *json_plural(size_t count);
 
-// return true to do retry , false no retry , code is error code 
+// return true to do retry , false no retry , code is error code
 bool canRetry(int32_t code, int8_t type);
 
 // single linked list

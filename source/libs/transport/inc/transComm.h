@@ -159,19 +159,19 @@ typedef struct {
   SEp    eps[];
 } SReqEpSet;
 
-#define TRANS_VER 2
+#define TRANS_VER 3
 typedef struct {
   char version : 4;       // RPC version
   char comp : 2;          // compression algorithm, 0:no compression 1:lz4
   char noResp : 2;        // noResp bits, 0: resp, 1: resp
   char withUserInfo : 2;  // 0: sent user info or not
-  char secured : 2;
+  char isToken : 2;
   char spi : 2;
   char hasEpSet : 2;  // contain epset or not, 0(default): no epset, 1: contain epset
 
   uint64_t timestamp;
   int32_t  compatibilityVer;
-  uint32_t magicNum;
+  uint32_t magicNum;  // crc value
   STraceId traceId;
   int64_t  qid;
   uint32_t code;  // del later
@@ -227,7 +227,7 @@ typedef struct {
   int8_t  retryInit;
   int8_t  epsetRetryCnt;
 } SReqCtx;
-typedef enum { Normal, Quit, Release, Register, Update, FreeById } STransMsgType;
+typedef enum { Normal, Quit, Release, Register, Update, FreeById, ReloadTLS } STransMsgType;
 typedef enum { ConnNormal, ConnAcquire, ConnRelease, ConnBroken, ConnInPool } ConnStatus;
 
 #define container_of(ptr, type, member) ((type*)((char*)(ptr)-offsetof(type, member)))
@@ -331,9 +331,13 @@ void    transDestroyBuffer(SConnBuffer* buf);
 int32_t transAllocBuffer(SConnBuffer* connBuf, uv_buf_t* uvBuf);
 bool    transReadComplete(SConnBuffer* connBuf);
 int32_t transResetBuffer(SConnBuffer* connBuf, int8_t resetBuf);
-int32_t transDumpFromBuffer(SConnBuffer* connBuf, char** buf, int8_t resetBuf);
+int32_t transConnBufferAppend(SConnBuffer* connBuf, char* buf, int32_t len);
+int32_t transDumpFromBuffer(SConnBuffer* connBuf, char** buf, int8_t resetBuf, int32_t* len);
 
 int32_t transSetConnOption(uv_tcp_t* stream, int keepalive);
+
+int32_t transDoCrc(char* buf, int32_t len);
+int32_t transDoCrcCheck(char* buf, int32_t len);
 #endif
 
 #ifdef TD_ASTRA_RPC
@@ -390,6 +394,7 @@ int32_t transSendResponse(const STransMsg* msg);
 int32_t transRegisterMsg(const STransMsg* msg);
 int32_t transSetDefaultAddr(void* pInit, const char* ip, const char* fqdn);
 int32_t transSetIpWhiteList(void* pInit, void* arg, FilteFunc* func);
+int32_t transSetTimeIpWhiteList(void* thandle, void* arg, FilteFunc* func);
 void    transRefSrvHandle(void* handle);
 void    transUnrefSrvHandle(void* handle);
 
@@ -400,19 +405,26 @@ int32_t transGetRefCount(void* handle);
 int32_t transReleaseCliHandle(void* handle, int32_t status);
 int32_t transReleaseSrvHandle(void* handle, int32_t status);
 
+int32_t transReloadTlsConfig(void* handle, int8_t type);
+
+int32_t transReloadClientTlsConfig(void* handle);
+
+int32_t transReloadServerTlsConfig(void* handle);
+
+
 #endif
 
 #ifndef TD_ASTRA_RPC
-void    transSockInfo2Str(struct sockaddr* sockname, char* dst);
+void    transSockInfo2Str(struct sockaddr* sockname, char* dst, int32_t cap);
 int32_t transAllocHandle(int64_t* refId);
-void*   transInitServer(uint32_t ip, uint32_t port, char* label, int numOfThreads, void* fp, void* pInit);
-void*   transInitClient(uint32_t ip, uint32_t port, char* label, int numOfThreads, void* fp, void* pInit);
+void*   transInitServer(SIpAddr* pAddr, char* label, int numOfThreads, void* fp, void* pInit);
+void*   transInitClient(SIpAddr* pAddr, char* label, int numOfThreads, void* fp, void* pInit);
 void    transCloseClient(void* arg);
 void    transCloseServer(void* arg);
 #else
 int32_t transAllocHandle(int64_t* refId);
-void*   transInitServer(uint32_t ip, uint32_t port, char* label, int numOfThreads, void* fp, void* pInit);
-void*   transInitClient(uint32_t ip, uint32_t port, char* label, int numOfThreads, void* fp, void* pInit);
+void*   transInitServer(SIpAddr* pAddr, char* label, int numOfThreads, void* fp, void* pInit);
+void*   transInitClient(SIpAddr* pAddr, char* label, int numOfThreads, void* fp, void* pInit);
 void    transCloseClient(void* arg);
 void    transCloseServer(void* arg);
 #endif
@@ -566,8 +578,10 @@ int32_t subnetInit(SubnetUtils* pUtils, SIpV4Range* pRange);
 int32_t subnetCheckIp(SubnetUtils* pUtils, uint32_t ip);
 int32_t subnetDebugInfoToBuf(SubnetUtils* pUtils, char* buf);
 
-int32_t transUtilSIpRangeToStr(SIpV4Range* pRange, char* buf);
-int32_t transUtilSWhiteListToStr(SIpWhiteList* pWhiteList, char** ppBuf);
+int32_t transUtilSIpRangeToStr(SIpV4Range* pRange, char* buf, int32_t cap);
+int32_t transUtilSWhiteListToStr(SIpWhiteListDual* pWhiteList, char** ppBuf);
+
+bool transUtilCheckDualIp(SIpRange* range, SIpRange* ip);
 
 #ifdef TD_ASTRA_RPC
 
@@ -620,8 +634,17 @@ uv_write_t* allocWReqFromWQ(queue* wq, void* arg);
 void freeWReqToWQ(queue* wq, SWReqsWrapper* w);
 
 int32_t transSetReadOption(uv_handle_t* handle);
-#endif
 
+int32_t transCachePut(int64_t refId, STrans* pTrans);
+int32_t transCacheGet(int64_t refId, STrans** pTrans);
+void    transCacheRemoveByRefId(int64_t refId);
+void    transCacheDestroy();
+
+STrans* transGetInst(int64_t mgtId, int64_t instId);
+
+STrans* transInstAcquire(int64_t mgtId, int64_t instId);
+void    transInstRelease(int64_t instId);
+#endif
 #ifdef __cplusplus
 }
 #endif

@@ -32,7 +32,7 @@ char funsName [FUNTYPE_CNT] [32] = {
 int32_t parseFunArgs(char* value, uint8_t funType, int64_t* min ,int64_t* max, int32_t* step ,int32_t* period ,int32_t* offset) {
     char* buf = strdup(value);
     char* p[4] = {NULL};
-    int32_t i = 0; 
+    int32_t i = 0;
     // find ")" fun end brance
     char* end = strstr(buf,")");
     if(end) {
@@ -46,11 +46,11 @@ int32_t parseFunArgs(char* value, uint8_t funType, int64_t* min ,int64_t* max, i
         free(buf);
         return 0;
     }
-    p[i++] = token; 
+    p[i++] = token;
 
     // find others
     while((token = strtok(NULL, ",")) && i < 4) {
-        p[i++] = token; 
+        p[i++] = token;
     }
 
     if(i != 4) {
@@ -76,15 +76,15 @@ int32_t parseFunArgs(char* value, uint8_t funType, int64_t* min ,int64_t* max, i
     return argsLen;
 }
 
-uint8_t parseFuns(char* expr, float* multiple, float* addend, float* base, int32_t* random, 
+uint8_t parseFuns(char* expr, float* multiple, float* addend, float* base, int32_t* random,
             int64_t* min ,int64_t* max, int32_t* step ,int32_t* period ,int32_t* offset) {
     // check valid
     if (expr == NULL || multiple == NULL || addend == NULL || base == NULL) {
         return FUNTYPE_NONE;
     }
 
-    size_t len = strlen(expr); 
-    if(len > 100) {
+    size_t len = strlen(expr);
+    if (len == 0 || len > 100) {
         return FUNTYPE_NONE;
     }
 
@@ -107,14 +107,14 @@ uint8_t parseFuns(char* expr, float* multiple, float* addend, float* base, int32
         bool found = true;
         char* p1 = strstr(value+1, "+");
         char* p2 = strstr(value+1, "-");
-        if(p1 && key1 > p1 ) 
+        if(p1 && key1 > p1 )
            found = false;
-        if(p2 && key1 > p2 ) 
+        if(p2 && key1 > p2 )
            found = false;
 
         if(found) {
             *key1 = 0;
-            *multiple = atof(value);
+            *multiple = (float)atof(value);
             key1 += 1;
         } else {
             key1 = value;
@@ -132,9 +132,6 @@ uint8_t parseFuns(char* expr, float* multiple, float* addend, float* base, int32
             funType = i + 1;
             key2 += strlen(funsName[i]);
             int32_t argsLen = parseFunArgs(key2, funType, min, max, step, period, offset);
-            if(len <= 0){
-                return FUNTYPE_NONE;
-            }
             key2 += argsLen;
 
             break;
@@ -145,16 +142,16 @@ uint8_t parseFuns(char* expr, float* multiple, float* addend, float* base, int32
 
     char* key3 = strstr(key2, "+");
     if(key3) {
-        *addend = atof(key3 + 1);
+        *addend = (float)atof(key3 + 1);
         key3 += 1;
     } else {
         key3 = strstr(key2, "-");
         if(key3) {
-           *addend = atof(key3 + 1) * -1;
+           *addend = (float)atof(key3 + 1) * -1;
            key3 += 1;
         }
     }
-    
+
 
     // random
     if(key3) {
@@ -169,11 +166,11 @@ uint8_t parseFuns(char* expr, float* multiple, float* addend, float* base, int32
     if(key3) {
         char* key5 = strstr(key3, "+");
         if(key5){
-            *base = atof(key5+1);
+            *base = (float)atof(key5+1);
         } else {
             key5 = strstr(key3, "-");
             if(key5)
-              *base = atof(key5+1) * -1;
+              *base = (float)atof(key5+1) * -1;
         }
     }
 
@@ -200,7 +197,7 @@ static int getColumnAndTagTypeFromInsertJsonFile(
         bool customName = false;
         uint8_t type = 0;
         int count = 1;
-        int64_t max = RAND_MAX >> 1;
+        int64_t max = ((uint64_t)RAND_MAX) >> 1;
         int64_t min = 0;
         double  maxInDbl = max;
         double  minInDbl = min;
@@ -290,11 +287,11 @@ static int getColumnAndTagTypeFromInsertJsonFile(
             if (type == TSDB_DATA_TYPE_FLOAT) maxScale = 6;
             else if (type == TSDB_DATA_TYPE_DOUBLE) maxScale = 15;
             else maxScale = precision;
-            
+
             tools_cJSON *dataScale = tools_cJSON_GetObjectItem(column, "scale");
             if (tools_cJSON_IsNumber(dataScale)) {
                 scale = dataScale->valueint;
-                if (scale < 0 || scale > maxScale) {
+                if (scale > maxScale) {
                     errorPrint("Invalid scale value of decimal type in json, precision: %d, scale: %d\n", precision, scale);
                     goto PARSE_OVER;
                 }
@@ -307,9 +304,9 @@ static int getColumnAndTagTypeFromInsertJsonFile(
             }
 
             if (type == TSDB_DATA_TYPE_FLOAT || type == TSDB_DATA_TYPE_DOUBLE) {
-                scalingFactor = pow(10, scale);
-                max = maxInDbl * scalingFactor;
-                min = minInDbl * scalingFactor;
+                scalingFactor = (uint32_t)pow(10, scale);
+                max = (int64_t)(maxInDbl * scalingFactor);
+                min = (int64_t)(minInDbl * scalingFactor);
             }
         }
 
@@ -448,7 +445,7 @@ static int getColumnAndTagTypeFromInsertJsonFile(
 
         for (int n = 0; n < count; ++n) {
             Field * col = benchCalloc(1, sizeof(Field), true);
-            benchArrayPush(stbInfo->cols, col);
+            (void)benchArrayPush(stbInfo->cols, col);
             col = benchArrayGet(stbInfo->cols, stbInfo->cols->size - 1);
             col->type = type;
             col->length = length;
@@ -480,14 +477,14 @@ static int getColumnAndTagTypeFromInsertJsonFile(
 
             if (customName) {
                 if (n >= 1) {
-                    snprintf(col->name, TSDB_COL_NAME_LEN,
+                    (void)snprintf(col->name, TSDB_COL_NAME_LEN,
                              "%s_%d", dataName->valuestring, n);
                 } else {
-                    snprintf(col->name, TSDB_COL_NAME_LEN,
+                    (void)snprintf(col->name, TSDB_COL_NAME_LEN,
                             "%s", dataName->valuestring);
                 }
             } else {
-                snprintf(col->name, TSDB_COL_NAME_LEN, "c%d", index);
+                (void)snprintf(col->name, TSDB_COL_NAME_LEN, "c%d", index);
             }
 
             // encode
@@ -534,7 +531,7 @@ static int getColumnAndTagTypeFromInsertJsonFile(
         bool customName = false;
         uint8_t type = 0;
         int count = 1;
-        int64_t max = RAND_MAX >> 1;
+        int64_t max = ((uint64_t)RAND_MAX) >> 1;
         int64_t min = 0;
         double  maxInDbl = max;
         double  minInDbl = min;
@@ -544,6 +541,7 @@ static int getColumnAndTagTypeFromInsertJsonFile(
         BDecimal decMax = {0};
         BDecimal decMin = {0};
         int32_t length = 4;
+        uint8_t tagGen = GEN_RANDOM;
         tools_cJSON *tagObj = tools_cJSON_GetArrayItem(tags, k);
         if (!tools_cJSON_IsObject(tagObj)) {
             errorPrint("%s", "Invalid tag format in json\n");
@@ -589,13 +587,13 @@ static int getColumnAndTagTypeFromInsertJsonFile(
 
             // create on stbInfo->tags
             Field * tag = benchCalloc(1, sizeof(Field), true);
-            benchArrayPush(stbInfo->tags, tag);
+            (void)benchArrayPush(stbInfo->tags, tag);
             tag = benchArrayGet(stbInfo->tags, stbInfo->tags->size - 1);
             if (customName) {
-                snprintf(tag->name, TSDB_COL_NAME_LEN,
+                (void)snprintf(tag->name, TSDB_COL_NAME_LEN,
                          "%s", dataName->valuestring);
             } else {
-                snprintf(tag->name, TSDB_COL_NAME_LEN, "jtag");
+                (void)snprintf(tag->name, TSDB_COL_NAME_LEN, "jtag");
             }
             tag->type = type;
             tag->length = JSON_FIXED_LENGTH; // json datatype is fixed length: 4096
@@ -644,9 +642,9 @@ static int getColumnAndTagTypeFromInsertJsonFile(
             }
 
             if (type == TSDB_DATA_TYPE_FLOAT || type == TSDB_DATA_TYPE_DOUBLE) {
-                scalingFactor = pow(10, scale);
-                max = maxInDbl * scalingFactor;
-                min = minInDbl * scalingFactor;
+                scalingFactor = (uint32_t)pow(10, scale);
+                max = (int64_t)(maxInDbl * scalingFactor);
+                min = (int64_t)(minInDbl * scalingFactor);
             }
         }
 
@@ -707,20 +705,24 @@ static int getColumnAndTagTypeFromInsertJsonFile(
         if (tools_cJSON_IsNumber(dataLen)) {
             length = (int32_t)dataLen->valueint;
         } else {
-            if (type == TSDB_DATA_TYPE_BINARY
-                || type == TSDB_DATA_TYPE_JSON
-                || type == TSDB_DATA_TYPE_VARBINARY
-                || type == TSDB_DATA_TYPE_GEOMETRY
-                || type == TSDB_DATA_TYPE_NCHAR) {
+            if (type == TSDB_DATA_TYPE_BINARY || type == TSDB_DATA_TYPE_JSON || type == TSDB_DATA_TYPE_VARBINARY ||
+                type == TSDB_DATA_TYPE_GEOMETRY || type == TSDB_DATA_TYPE_NCHAR || type == TSDB_DATA_TYPE_BLOB) {
                 length = g_arguments->binwidth;
             } else {
                 length = convertTypeToLength(type);
             }
         }
 
+        tools_cJSON *tagDataGen = tools_cJSON_GetObjectItem(tagObj, "gen");
+        if (tools_cJSON_IsString(tagDataGen)) {
+            if (strcasecmp(tagDataGen->valuestring, "order") == 0) {
+                tagGen = GEN_ORDER;
+            }
+        }
+
         for (int n = 0; n < count; ++n) {
             Field * tag = benchCalloc(1, sizeof(Field), true);
-            benchArrayPush(stbInfo->tags, tag);
+            (void)benchArrayPush(stbInfo->tags, tag);
             tag = benchArrayGet(stbInfo->tags, stbInfo->tags->size - 1);
             tag->type = type;
             tag->length = length;
@@ -737,16 +739,17 @@ static int getColumnAndTagTypeFromInsertJsonFile(
             tag->decMax = decMax;
             tag->decMin = decMin;
             tag->values = dataValues;
+            tag->gen = tagGen;
             if (customName) {
                 if (n >= 1) {
-                    snprintf(tag->name, TSDB_COL_NAME_LEN,
+                    (void)snprintf(tag->name, TSDB_COL_NAME_LEN,
                              "%s_%d", dataName->valuestring, n);
                 } else {
-                    snprintf(tag->name, TSDB_COL_NAME_LEN,
+                    (void)snprintf(tag->name, TSDB_COL_NAME_LEN,
                              "%s", dataName->valuestring);
                 }
             } else {
-                snprintf(tag->name, TSDB_COL_NAME_LEN, "t%d", index);
+                (void)snprintf(tag->name, TSDB_COL_NAME_LEN, "t%d", index);
             }
             index++;
         }
@@ -791,7 +794,7 @@ void setDBCfgString(SDbCfg* cfg , char * value) {
         0 == trimCaseCmp(cfg->name, "dnodes"    ) ||
         0 == trimCaseCmp(cfg->name, "precision" ) ) {
             add = true;
-    }    
+    }
 
     if (value[0] == '\'' || value[0] == '\"') {
         // already have quotation
@@ -822,7 +825,7 @@ static int getDatabaseInfo(tools_cJSON *dbinfos, int index) {
     if (index > 0) {
         database = benchCalloc(1, sizeof(SDataBase), true);
         database->superTbls = benchArrayInit(1, sizeof(SSuperTable));
-        benchArrayPush(g_arguments->databases, database);
+        (void)benchArrayPush(g_arguments->databases, database);
     }
     database = benchArrayGet(g_arguments->databases, index);
     if (database->cfgs == NULL) {
@@ -833,7 +836,7 @@ static int getDatabaseInfo(tools_cJSON *dbinfos, int index) {
     if(!(g_argFlag & ARG_OPT_NODROP)) {
         database->drop = true;
     }
-  
+
     database->flush = false;
     database->precision = TSDB_TIME_PRECISION_MILLI;
     database->sml_precision = TSDB_SML_TIMESTAMP_MILLI_SECONDS;
@@ -890,7 +893,7 @@ static int getDatabaseInfo(tools_cJSON *dbinfos, int index) {
                 free(cfg);
                 return -1;
             }
-            benchArrayPush(database->cfgs, cfg);
+            (void)benchArrayPush(database->cfgs, cfg);
         }
         cfg_object = cfg_object->next;
     }
@@ -976,7 +979,7 @@ static int get_tsma_info(tools_cJSON* stb_obj, SSuperTable* stbInfo) {
             tsma->start_when_inserted = (int)tsma_start_obj->valueint;
         }
 
-        benchArrayPush(stbInfo->tsmas, tsma);
+        (void)benchArrayPush(stbInfo->tsmas, tsma);
     }
 
     return 0;
@@ -987,7 +990,7 @@ void parseStringToIntArray(char *str, BArray *arr) {
     if (NULL == strstr(str, ",")) {
         int *val = benchCalloc(1, sizeof(int), true);
         *val = atoi(str);
-        benchArrayPush(arr, val);
+        (void)benchArrayPush(arr, val);
     } else {
         char *dup_str = strdup(str);
         char *running = dup_str;
@@ -995,7 +998,7 @@ void parseStringToIntArray(char *str, BArray *arr) {
         while (token) {
             int *val = benchCalloc(1, sizeof(int), true);
             *val = atoi(token);
-            benchArrayPush(arr, val);
+            (void)benchArrayPush(arr, val);
             token = strsep(&running, ",");
         }
         tmfree(dup_str);
@@ -1032,7 +1035,7 @@ static int getStableInfo(tools_cJSON *dbinfos, int index) {
         SSuperTable *superTable;
         if (index > 0 || i > 0) {
             superTable = benchCalloc(1, sizeof(SSuperTable), true);
-            benchArrayPush(database->superTbls, superTable);
+            (void)benchArrayPush(database->superTbls, superTable);
             superTable = benchArrayGet(database->superTbls, i);
             superTable->cols = benchArrayInit(1, sizeof(Field));
             superTable->tags = benchArrayInit(1, sizeof(Field));
@@ -1052,13 +1055,14 @@ static int getStableInfo(tools_cJSON *dbinfos, int index) {
         superTable->timestamp_step = 1;
         superTable->angle_step = 1;
         superTable->useSampleTs = false;
+        superTable->useTagTableName = false;
         superTable->non_stop = false;
         superTable->insertRows = 0;
         superTable->interlaceRows = 0;
         superTable->disorderRatio = 0;
         superTable->disorderRange = DEFAULT_DISORDER_RANGE;
         superTable->insert_interval = g_arguments->insert_interval;
-        superTable->max_sql_len = TSDB_MAX_ALLOWED_SQL_LEN;
+        superTable->max_sql_len = TOOLS_MAX_ALLOWED_SQL_LEN;
         superTable->partialColNum = 0;
         superTable->partialColFrom = 0;
         superTable->comment = NULL;
@@ -1169,7 +1173,7 @@ static int getStableInfo(tools_cJSON *dbinfos, int index) {
                 encodeAuthBase64();
                 g_arguments->rest_server_ver_major =
                     getServerVersionRest(g_arguments->port + TSDB_PORT_HTTP);
-            }            
+            }
         }
 
 
@@ -1218,11 +1222,11 @@ static int getStableInfo(tools_cJSON *dbinfos, int index) {
             superTable->childTblOffset = childTbl_offset->valueint;
         }
 
-        // check limit offset 
+        // check limit offset
         if( superTable->childTblOffset + superTable->childTblLimit > superTable->childTblCount ) {
             errorPrint("json config invalid. childtable_offset(%"PRId64") + childtable_limit(%"PRId64") > childtable_count(%"PRId64")",
                   superTable->childTblOffset, superTable->childTblLimit, superTable->childTblCount);
-            return -1;          
+            return -1;
         }
 
         tools_cJSON *childTbl_from =
@@ -1250,12 +1254,12 @@ static int getStableInfo(tools_cJSON *dbinfos, int index) {
 
         // check childtable_from and childtable_to valid
         if (superTable->childTblCount > 0 && superTable->childTblFrom >= superTable->childTblCount) {
-            errorPrint("json config invalid. childtable_from(%"PRId64") is equal or large than childtable_count(%"PRId64")\n", 
+            errorPrint("json config invalid. childtable_from(%"PRId64") is equal or large than childtable_count(%"PRId64")\n",
                     superTable->childTblFrom, superTable->childTblCount);
             return -1;
-        }  
+        }
         if (superTable->childTblCount > 0 && superTable->childTblTo > superTable->childTblCount) {
-            errorPrint("json config invalid. childtable_to(%"PRId64") is large than childtable_count(%"PRId64")\n", 
+            errorPrint("json config invalid. childtable_to(%"PRId64") is large than childtable_count(%"PRId64")\n",
                     superTable->childTblTo, superTable->childTblCount);
             return -1;
         }
@@ -1393,6 +1397,23 @@ static int getStableInfo(tools_cJSON *dbinfos, int index) {
                      MAX_FILE_NAME_LEN);
         } else {
             memset(superTable->tagsFile, 0, MAX_FILE_NAME_LEN);
+        }
+
+        tools_cJSON *primaryKeyName =
+            tools_cJSON_GetObjectItem(stbInfo, "primary_key_name");
+        if (tools_cJSON_IsString(primaryKeyName)
+            && primaryKeyName->valuestring != NULL
+            && strlen(primaryKeyName->valuestring) > 0) {
+            TOOLS_STRNCPY(superTable->primaryKeyName, primaryKeyName->valuestring, TSDB_COL_NAME_LEN);
+        } else {
+            TOOLS_STRNCPY(superTable->primaryKeyName, "ts", TSDB_COL_NAME_LEN);
+        }
+
+        tools_cJSON *useTagTableName =
+            tools_cJSON_GetObjectItem(stbInfo, "use_tag_table_name");
+        if (tools_cJSON_IsString(useTagTableName) &&
+            (0 == strcasecmp(useTagTableName->valuestring, "yes"))) {
+            superTable->useTagTableName = true;
         }
 
         tools_cJSON *insertRows =
@@ -1647,114 +1668,6 @@ static int getStableInfo(tools_cJSON *dbinfos, int index) {
     return 0;
 }
 
-static int getStreamInfo(tools_cJSON* json) {
-    tools_cJSON* streamsObj = tools_cJSON_GetObjectItem(json, "streams");
-    if (tools_cJSON_IsArray(streamsObj)) {
-        int streamCnt = tools_cJSON_GetArraySize(streamsObj);
-        for (int i = 0; i < streamCnt; ++i) {
-            tools_cJSON* streamObj = tools_cJSON_GetArrayItem(streamsObj, i);
-            if (!tools_cJSON_IsObject(streamObj)) {
-                errorPrint("%s", "invalid stream format in json\n");
-                return -1;
-            }
-            tools_cJSON* stream_name =
-                tools_cJSON_GetObjectItem(streamObj, "stream_name");
-            tools_cJSON* stream_stb =
-                tools_cJSON_GetObjectItem(streamObj, "stream_stb");
-            tools_cJSON* source_sql =
-                tools_cJSON_GetObjectItem(streamObj, "source_sql");
-            if (!tools_cJSON_IsString(stream_name)
-                || !tools_cJSON_IsString(stream_stb)
-                || !tools_cJSON_IsString(source_sql)) {
-                errorPrint("%s", "Invalid or miss "
-                           "'stream_name'/'stream_stb'/'source_sql' "
-                           "key in json\n");
-                return -1;
-            }
-            SSTREAM * stream = benchCalloc(1, sizeof(SSTREAM), true);
-            TOOLS_STRNCPY(stream->stream_name, stream_name->valuestring,
-                     TSDB_TABLE_NAME_LEN);
-            TOOLS_STRNCPY(stream->stream_stb, stream_stb->valuestring,
-                     TSDB_TABLE_NAME_LEN);
-            TOOLS_STRNCPY(stream->source_sql, source_sql->valuestring,
-                     TSDB_DEFAULT_PKT_SIZE);
-
-            tools_cJSON* trigger_mode =
-                tools_cJSON_GetObjectItem(streamObj, "trigger_mode");
-            if (tools_cJSON_IsString(trigger_mode)) {
-                TOOLS_STRNCPY(stream->trigger_mode, trigger_mode->valuestring,
-                         BIGINT_BUFF_LEN);
-            }
-
-            tools_cJSON* watermark =
-                tools_cJSON_GetObjectItem(streamObj, "watermark");
-            if (tools_cJSON_IsString(watermark)) {
-                TOOLS_STRNCPY(stream->watermark, watermark->valuestring,
-                         BIGINT_BUFF_LEN);
-            }
-
-            tools_cJSON* ignore_expired =
-                tools_cJSON_GetObjectItem(streamObj, "ignore_expired");
-            if (tools_cJSON_IsString(ignore_expired)) {
-                TOOLS_STRNCPY(stream->ignore_expired, ignore_expired->valuestring,
-                         BIGINT_BUFF_LEN);
-            }
-
-            tools_cJSON* ignore_update =
-                tools_cJSON_GetObjectItem(streamObj, "ignore_update");
-            if (tools_cJSON_IsString(ignore_update)) {
-                TOOLS_STRNCPY(stream->ignore_update, ignore_update->valuestring,
-                         BIGINT_BUFF_LEN);
-            }
-
-            tools_cJSON* fill_history =
-                tools_cJSON_GetObjectItem(streamObj, "fill_history");
-            if (tools_cJSON_IsString(fill_history)) {
-                TOOLS_STRNCPY(stream->fill_history, fill_history->valuestring,
-                         BIGINT_BUFF_LEN);
-            }
-
-            tools_cJSON* stream_stb_field =
-                tools_cJSON_GetObjectItem(streamObj, "stream_stb_field");
-            if (tools_cJSON_IsString(stream_stb_field)) {
-                TOOLS_STRNCPY(stream->stream_stb_field,
-                         stream_stb_field->valuestring,
-                         TSDB_DEFAULT_PKT_SIZE);
-            }
-
-            tools_cJSON* stream_tag_field =
-                tools_cJSON_GetObjectItem(streamObj, "stream_tag_field");
-            if (tools_cJSON_IsString(stream_tag_field)) {
-                TOOLS_STRNCPY(stream->stream_tag_field,
-                         stream_tag_field->valuestring,
-                         TSDB_DEFAULT_PKT_SIZE);
-            }
-
-            tools_cJSON* subtable =
-                tools_cJSON_GetObjectItem(streamObj, "subtable");
-            if (tools_cJSON_IsString(subtable)) {
-                TOOLS_STRNCPY(stream->subtable, subtable->valuestring,
-                         TSDB_DEFAULT_PKT_SIZE);
-            }
-
-            tools_cJSON* drop = tools_cJSON_GetObjectItem(streamObj, "drop");
-            if (tools_cJSON_IsString(drop)) {
-                if (0 == strcasecmp(drop->valuestring, "yes")) {
-                    stream->drop = true;
-                } else if (0 == strcasecmp(drop->valuestring, "no")) {
-                    stream->drop = false;
-                } else {
-                    errorPrint("invalid value for drop field: %s\n",
-                               drop->valuestring);
-                    return -1;
-                }
-            }
-            benchArrayPush(g_arguments->streams, stream);
-        }
-    }
-    return 0;
-}
-
 // read common item
 static int getMetaFromCommonJsonFile(tools_cJSON *json) {
     int32_t code = -1;
@@ -1766,7 +1679,7 @@ static int getMetaFromCommonJsonFile(tools_cJSON *json) {
             debugPrint("configDir from cfg: %s\n", g_configDir);
         } else {
             warnPrint("configDir set by command line, so ignore cfg. cmd: %s\n", g_configDir);
-        }        
+        }
     }
 
     // dsn
@@ -1776,7 +1689,7 @@ static int getMetaFromCommonJsonFile(tools_cJSON *json) {
             g_arguments->dsn = dsn->valuestring;
             infoPrint("read dsn from json. dsn=%s\n", g_arguments->dsn);
         }
-    }    
+    }
 
     // host
     tools_cJSON *host = tools_cJSON_GetObjectItem(json, "host");
@@ -1784,7 +1697,7 @@ static int getMetaFromCommonJsonFile(tools_cJSON *json) {
         if(g_arguments->host == NULL) {
             g_arguments->host = host->valuestring;
             infoPrint("read host from json: %s .\n", g_arguments->host);
-        }     
+        }
     }
 
     // port
@@ -1798,7 +1711,7 @@ static int getMetaFromCommonJsonFile(tools_cJSON *json) {
             if (port->valueint != DEFAULT_PORT) {
                 g_arguments->port = (uint16_t)port->valueint;
                 infoPrint("read port form json: %d .\n", g_arguments->port);
-                g_arguments->port_inputted = true;    
+                g_arguments->port_inputted = true;
             }
         }
     }
@@ -1819,7 +1732,7 @@ static int getMetaFromCommonJsonFile(tools_cJSON *json) {
         if(g_arguments->password == NULL) {
             g_arguments->password = password->valuestring;
             infoPrint("read password from json: %s .\n", "******");
-        }        
+        }
     }
 
     // yes, no
@@ -1884,6 +1797,22 @@ static int getMetaFromInsertJsonFile(tools_cJSON *json) {
     if (resultfile && resultfile->type == tools_cJSON_String
             && resultfile->valuestring != NULL) {
         g_arguments->output_file = resultfile->valuestring;
+    }
+
+    tools_cJSON *resultJsonFile = tools_cJSON_GetObjectItem(json, "result_json_file");
+    if (resultJsonFile && resultJsonFile->type == tools_cJSON_String
+            && resultJsonFile->valuestring != NULL) {
+        if(g_arguments->output_json_file == NULL) {
+            g_arguments->output_json_file = resultJsonFile->valuestring;
+        }
+    }
+
+    if(g_arguments->output_json_file != NULL) {
+        if (check_write_permission(g_arguments->output_json_file)) {
+            errorPrint("json file %s does not have write permission.\n", g_arguments->output_json_file);
+            goto PARSE_OVER;
+        }
+        infoPrint("json output file: %s\n", g_arguments->output_json_file);
     }
 
     tools_cJSON *threads = tools_cJSON_GetObjectItem(json, "thread_count");
@@ -1986,12 +1915,6 @@ static int getMetaFromInsertJsonFile(tools_cJSON *json) {
         }
     }
 
-    if (g_arguments->taosc_version == 3) {
-        if (getStreamInfo(json)) {
-            goto PARSE_OVER;
-        }
-    }
-
     code = 0;
 
 PARSE_OVER:
@@ -2051,7 +1974,7 @@ int32_t readSpecQueryJson(tools_cJSON * specifiedQuery) {
                     batchQueryObj->valuestring);
                 return -1;
             }
-        }        
+        }
 
         tools_cJSON *concurrent =
             tools_cJSON_GetObjectItem(specifiedQuery, "concurrent");
@@ -2133,10 +2056,10 @@ int32_t readSpecQueryJson(tools_cJSON * specifiedQuery) {
                            sqlFileObj->valuestring);
                 return -1;
             }
-            char *buf = benchCalloc(1, TSDB_MAX_ALLOWED_SQL_LEN, true);
-            while (fgets(buf, TSDB_MAX_ALLOWED_SQL_LEN, fp)) {
+            char *buf = benchCalloc(1, TOOLS_MAX_ALLOWED_SQL_LEN, true);
+            while (fgets(buf, TOOLS_MAX_ALLOWED_SQL_LEN, fp)) {
                 SSQL * sql = benchCalloc(1, sizeof(SSQL), true);
-                benchArrayPush(g_queryInfo.specifiedQueryInfo.sqls, sql);
+                (void)benchArrayPush(g_queryInfo.specifiedQueryInfo.sqls, sql);
                 sql = benchArrayGet(g_queryInfo.specifiedQueryInfo.sqls,
                         g_queryInfo.specifiedQueryInfo.sqls->size - 1);
                 int bufLen = strlen(buf) + 1;
@@ -2147,7 +2070,7 @@ int32_t readSpecQueryJson(tools_cJSON * specifiedQuery) {
                         sizeof(int64_t), true);
                 TOOLS_STRNCPY(sql->command, buf, bufLen - 1);
                 debugPrint("read file buffer: %s\n", sql->command);
-                memset(buf, 0, TSDB_MAX_ALLOWED_SQL_LEN);
+                memset(buf, 0, TOOLS_MAX_ALLOWED_SQL_LEN);
             }
             free(buf);
             fclose(fp);
@@ -2162,7 +2085,7 @@ int32_t readSpecQueryJson(tools_cJSON * specifiedQuery) {
                     tools_cJSON_GetArrayItem(specifiedSqls, j);
                 if (tools_cJSON_IsObject(sqlObj)) {
                     SSQL * sql = benchCalloc(1, sizeof(SSQL), true);
-                    benchArrayPush(g_queryInfo.specifiedQueryInfo.sqls, sql);
+                    (void)benchArrayPush(g_queryInfo.specifiedQueryInfo.sqls, sql);
                     sql = benchArrayGet(g_queryInfo.specifiedQueryInfo.sqls,
                             g_queryInfo.specifiedQueryInfo.sqls->size -1);
                     sql->delay_list = benchCalloc(
@@ -2176,36 +2099,6 @@ int32_t readSpecQueryJson(tools_cJSON * specifiedQuery) {
                         int strLen = strlen(sqlStr->valuestring) + 1;
                         sql->command = benchCalloc(1, strLen, true);
                         TOOLS_STRNCPY(sql->command, sqlStr->valuestring, strLen);
-                        // default value is -1, which mean infinite loop
-                        g_queryInfo.specifiedQueryInfo.endAfterConsume[j] = -1;
-                        tools_cJSON *endAfterConsume =
-                            tools_cJSON_GetObjectItem(specifiedQuery,
-                                                      "endAfterConsume");
-                        if (tools_cJSON_IsNumber(endAfterConsume)) {
-                            g_queryInfo.specifiedQueryInfo.endAfterConsume[j] =
-                                (int)endAfterConsume->valueint;
-                        }
-                        if (g_queryInfo.specifiedQueryInfo
-                                .endAfterConsume[j] < -1) {
-                            g_queryInfo.specifiedQueryInfo
-                                .endAfterConsume[j] = -1;
-                        }
-
-                        g_queryInfo.specifiedQueryInfo
-                                .resubAfterConsume[j] = -1;
-                        tools_cJSON *resubAfterConsume =
-                            tools_cJSON_GetObjectItem(
-                                    specifiedQuery, "resubAfterConsume");
-                        if (tools_cJSON_IsNumber(resubAfterConsume)) {
-                            g_queryInfo.specifiedQueryInfo.resubAfterConsume[j]
-                                = (int)resubAfterConsume->valueint;
-                        }
-
-                        if (g_queryInfo.specifiedQueryInfo
-                                .resubAfterConsume[j] < -1)
-                            g_queryInfo.specifiedQueryInfo
-                                    .resubAfterConsume[j] = -1;
-
                         tools_cJSON *result =
                             tools_cJSON_GetObjectItem(sqlObj, "result");
                         if (tools_cJSON_IsString(result)) {
@@ -2365,7 +2258,7 @@ int32_t readSuperQueryJson(tools_cJSON * superQuery) {
                 tools_cJSON *sqlStr = tools_cJSON_GetObjectItem(sql, "sql");
                 if (sqlStr && sqlStr->type == tools_cJSON_String) {
                     TOOLS_STRNCPY(g_queryInfo.superQueryInfo.sql[j],
-                             sqlStr->valuestring, TSDB_MAX_ALLOWED_SQL_LEN);
+                             sqlStr->valuestring, TOOLS_MAX_ALLOWED_SQL_LEN);
                 }
 
                 tools_cJSON *result = tools_cJSON_GetObjectItem(sql, "result");
@@ -2380,12 +2273,12 @@ int32_t readSuperQueryJson(tools_cJSON * superQuery) {
             }
         }
     }
-    
+
     // succ
     return 0;
 }
 
-// read query json 
+// read query json
 static int getMetaFromQueryJsonFile(tools_cJSON *json) {
     int32_t code = -1;
 
@@ -2454,6 +2347,17 @@ static int getMetaFromQueryJsonFile(tools_cJSON *json) {
             return -1;
         }
     }
+
+    tools_cJSON *resultJsonFile = tools_cJSON_GetObjectItem(json, "result_json_file");
+    if (resultJsonFile && resultJsonFile->type == tools_cJSON_String
+            && resultJsonFile->valuestring != NULL) {
+        g_arguments->output_json_file = resultJsonFile->valuestring;
+        if (check_write_permission(g_arguments->output_json_file)) {
+            errorPrint("json file %s does not have write permission.\n", g_arguments->output_json_file);
+            return -1;
+        }
+    }
+
     // init sqls
     g_queryInfo.specifiedQueryInfo.sqls = benchArrayInit(1, sizeof(SSQL));
 
@@ -2463,7 +2367,7 @@ static int getMetaFromQueryJsonFile(tools_cJSON *json) {
         code = readSpecQueryJson(specifiedQuery);
         if(code) {
             errorPrint("failed to readSpecQueryJson code=%d \n", code);
-            return code; 
+            return code;
         }
     }
 
@@ -2473,7 +2377,7 @@ static int getMetaFromQueryJsonFile(tools_cJSON *json) {
         code = readSuperQueryJson(superQuery);
         if(code) {
             errorPrint("failed to readSuperQueryJson code=%d \n", code);
-            return code; 
+            return code;
         }
     }
 
@@ -2500,6 +2404,16 @@ static int getMetaFromTmqJsonFile(tools_cJSON *json) {
     if (resultfile && resultfile->type == tools_cJSON_String
             && resultfile->valuestring != NULL) {
         g_arguments->output_file = resultfile->valuestring;
+    }
+
+    tools_cJSON *resultJsonFile = tools_cJSON_GetObjectItem(json, "result_json_file");
+    if (resultJsonFile && resultJsonFile->type == tools_cJSON_String
+            && resultJsonFile->valuestring != NULL) {
+        g_arguments->output_json_file = resultJsonFile->valuestring;
+        if (check_write_permission(g_arguments->output_json_file)) {
+            errorPrint("json file %s does not have write permission.\n", g_arguments->output_json_file);
+            goto TMQ_PARSE_OVER;
+        }
     }
 
     tools_cJSON *answerPrompt =
@@ -2688,7 +2602,7 @@ int readJsonConfig(char * file) {
     // read common item
     code = getMetaFromCommonJsonFile(root);
     if (INSERT_TEST == g_arguments->test_mode || CSVFILE_TEST == g_arguments->test_mode) {
-        // insert 
+        // insert
         code = getMetaFromInsertJsonFile(root);
     } else if (QUERY_TEST == g_arguments->test_mode) {
         // query

@@ -24,6 +24,7 @@ extern "C" {
 #include "systable.h"
 #include "tarray.h"
 #include "thash.h"
+#include "tcol.h"
 #include "tlog.h"
 #include "tmsg.h"
 #include "tmsgcb.h"
@@ -42,8 +43,8 @@ typedef enum {
 } EJobTaskType;
 
 typedef enum {
-  TASK_TYPE_PERSISTENT = 1,
-  TASK_TYPE_TEMP,
+  TASK_TYPE_HQUERY = 1,
+  TASK_TYPE_QUERY,
 } ETaskType;
 
 typedef enum {
@@ -69,9 +70,12 @@ typedef enum {
 #define QUERY_MSG_MASK_SHOW_REWRITE() (1 << 0)
 #define QUERY_MSG_MASK_AUDIT()        (1 << 1)
 #define QUERY_MSG_MASK_VIEW()         (1 << 2)
+#define QUERY_MSG_MASK_SUBQUERY()     (1 << 3)
+
 #define TEST_SHOW_REWRITE_MASK(m)     (((m)&QUERY_MSG_MASK_SHOW_REWRITE()) != 0)
 #define TEST_AUDIT_MASK(m)            (((m)&QUERY_MSG_MASK_AUDIT()) != 0)
 #define TEST_VIEW_MASK(m)             (((m)&QUERY_MSG_MASK_VIEW()) != 0)
+#define TEST_SUBQUERY_MASK(m)         (((m)&QUERY_MSG_MASK_SUBQUERY()) != 0)
 
 typedef struct STableComInfo {
   uint8_t  numOfTags;     // the number of tags in schema
@@ -112,7 +116,10 @@ typedef struct SVCTableMeta {
   int32_t  vgId;
   int8_t   tableType;
   int32_t  numOfColRefs;
+  int32_t  rversion; // virtual table's column ref's version
   SColRef* colRef;
+  int32_t  numOfTagRefs;
+  SColRef* tagRef;
 } SVCTableMeta;
 #pragma pack(pop)
 
@@ -127,7 +134,10 @@ typedef struct STableMeta {
   // END: KEEP THIS PART SAME WITH SCTableMeta
 
   int32_t       numOfColRefs;
+  int32_t       rversion; // virtual table's column ref's version
   SColRef*      colRef;
+  int32_t       numOfTagRefs;
+  SColRef*      tagRef;
   // END: KEEP THIS PART SAME WITH SVCTableMeta
 
   // if the table is TSDB_CHILD_TABLE, the following information is acquired from the corresponding super table meta
@@ -137,14 +147,64 @@ typedef struct STableMeta {
   STableComInfo tableInfo;
   SSchemaExt*   schemaExt;  // There is no additional memory allocation, and the pointer is fixed to the next address of
                             // the schema content.
-  int8_t        virtualStb;
-  SSchema       schema[];
+  union {
+    uint8_t flag;
+    struct {
+      uint8_t virtualStb : 1;
+      uint8_t isAudit : 1;
+      uint8_t secLvl : 3;  // security level (0-4), mapped from STableMetaRsp.secLvl
+      uint8_t reserved : 3;
+    };
+  };
+  int64_t ownerId;
+  int8_t  secureDelete;
+  SSchema schema[];
 } STableMeta;
 #pragma pack(pop)
 
+#define TABLE_TOTAL_COL_NUM(pMeta) ((pMeta)->tableInfo.numOfColumns + (pMeta)->tableInfo.numOfTags)
+
+#define TABLE_META_BASE_SIZE(pMeta) \
+  (NULL == (pMeta) ? 0 : (sizeof(STableMeta) + TABLE_TOTAL_COL_NUM((pMeta)) * sizeof(SSchema)))
+
+#define TABLE_META_SCHEMA_EXT_SIZE(pMeta) \
+  ((withExtSchema((pMeta)->tableType) && NULL != (pMeta)->schemaExt) ? (pMeta)->tableInfo.numOfColumns * sizeof(SSchemaExt) : 0)
+
+#define TABLE_META_COL_REF_SIZE(pMeta) \
+  ((hasRefCol((pMeta)->tableType) && NULL != (pMeta)->colRef) ? (pMeta)->numOfColRefs * sizeof(SColRef) : 0)
+
+#define TABLE_META_FULL_SIZE(pMeta) \
+  (NULL == (pMeta) ? 0 : (TABLE_META_BASE_SIZE((pMeta)) + TABLE_META_SCHEMA_EXT_SIZE((pMeta)) + TABLE_META_COL_REF_SIZE((pMeta))))
+
+static inline void tableMetaResetPointers(STableMeta *pMeta) {
+  if (NULL == pMeta) {
+    return;
+  }
+
+  char *pCursor = (char *)pMeta + TABLE_META_BASE_SIZE(pMeta);
+
+  if (withExtSchema(pMeta->tableType) && NULL != pMeta->schemaExt) {
+    pMeta->schemaExt = (SSchemaExt *)pCursor;
+    pCursor += pMeta->tableInfo.numOfColumns * sizeof(SSchemaExt);
+  } else {
+    pMeta->schemaExt = NULL;
+  }
+
+  if (hasRefCol(pMeta->tableType) && NULL != pMeta->colRef) {
+    pMeta->colRef = (SColRef *)pCursor;
+    pCursor += pMeta->numOfColRefs * sizeof(SColRef);
+  } else {
+    pMeta->colRef = NULL;
+  }
+
+  pMeta->tagRef = NULL;
+  pMeta->numOfTagRefs = 0;
+}
+
 typedef struct SViewMeta {
   uint64_t viewId;
-  char*    user;
+  int64_t  ownerId;
+  char*    createUser;
   char*    querySql;
   int8_t   precision;
   int8_t   type;
@@ -153,11 +213,21 @@ typedef struct SViewMeta {
   SSchema* pSchema;
 } SViewMeta;
 
+typedef SRsmaInfoRsp SRsmaMeta;
+typedef SRsmaMeta SRsmaMetaOutput;
+
 typedef struct SDBVgInfo {
-  int32_t   vgVersion;
-  int16_t   hashPrefix;
-  int16_t   hashSuffix;
-  int8_t    hashMethod;
+  int32_t vgVersion;
+  int16_t hashPrefix;
+  int16_t hashSuffix;
+  int8_t  hashMethod;
+  union {
+    uint8_t flags;
+    struct {
+      uint8_t isMount : 1;  // TS-5868
+      uint8_t padding : 7;
+    };
+  };
   int32_t   numOfTable;  // DB's table num, unit is TSDB_TABLE_NUM_UNIT
   int64_t   stateTs;
   SHashObj* vgHash;   // key:vgId, value:SVgroupInfo
@@ -197,6 +267,7 @@ typedef struct SUseDbOutput {
   uint64_t   dbId;
   SDBVgInfo* dbVgroup;
 } SUseDbOutput;
+typedef SUseDbOutput** SUseDbOutputPPter;
 
 enum { META_TYPE_NULL_TABLE = 1,
        META_TYPE_CTABLE,
@@ -240,17 +311,26 @@ typedef struct STargetInfo {
   int32_t     vgId;
 } STargetInfo;
 
+typedef struct STagsInfo {
+  SArray*  STagNames;  // STagVal
+  SArray*  pTagVals;
+  uint8_t* pTagIndex;
+  int32_t  numOfTags;
+} STagsInfo;
+
 typedef struct SBoundColInfo {
   int16_t* pColIndex;  // bound index => schema index
   int32_t  numOfCols;
   int32_t  numOfBound;
   bool     hasBoundCols;
   bool     mixTagsCols;
+  STagsInfo* parseredTags;  // used for partial fixed value stmt
 } SBoundColInfo;
 
 typedef struct STableColsData {
   char    tbName[TSDB_TABLE_NAME_LEN];
   SArray* aCol;
+  SBlobSet* pBlobSet;
   bool    getFromHash;
   bool    isOrdered;
   bool    isDuplicateTs;
@@ -258,6 +338,7 @@ typedef struct STableColsData {
 
 typedef struct STableVgUid {
   uint64_t uid;
+  uint64_t suid;
   int32_t  vgid;
 } STableVgUid;
 
@@ -274,27 +355,29 @@ typedef struct STableDataCxt {
   STableMeta*    pMeta;
   STSchema*      pSchema;
   SBoundColInfo  boundColsInfo;
-  SArray*        pValues;
+  SArray*        pValues;  // SColVal
   SSubmitTbData* pData;
   SRowKey        lastKey;
   bool           ordered;
   bool           duplicateTs;
+  int8_t         hasBlob;  // if the table has blob column
 } STableDataCxt;
 
 typedef struct SStbInterlaceInfo {
   void*          pCatalog;
   void*          pQuery;
   int32_t        acctId;
-  char*          dbname;
+  char*          dbname; /* heap copy; TAOS client frees with stmt siInfo cleanup (stmtCleanSQLInfo) */
   void*          transport;
   SEpSet         mgmtEpSet;
   void*          pRequest;
   uint64_t       requestId;
   int64_t        requestSelf;
   bool           tbFromHash;
-  SHashObj*      pVgroupHash;
-  SArray*        pVgroupList;
-  SSHashObj*     pTableHash;
+  SHashObj*      pVgroupHash;        // key:vgId, value:SVgroupDataCxt
+  SArray*        pVgroupList;        // SVgroupDataCxt
+  SSHashObj*     pTableHash;         // key:tbname, value:STableVgUid
+  SSHashObj*     pTableRowDataHash;  // key:tbname, value:SSubmitTbData->aRowP
   int64_t        tbRemainNum;
   STableBufInfo  tbBuf;
   char           firstName[TSDB_TABLE_NAME_LEN];
@@ -325,6 +408,7 @@ typedef struct SMsgSendInfo {
   STargetInfo          target;  // for update epset
   __freeFunc           paramFreeFp;
   void*                param;
+  int8_t               streamAHandle;
   uint64_t             requestId;
   uint64_t             requestObjRefId;
   int32_t              msgType;
@@ -354,6 +438,8 @@ int32_t taosAsyncExec(__async_exec_fn_t execFn, void* execParam, int32_t* code);
 int32_t taosAsyncWait();
 int32_t taosAsyncRecover();
 int32_t taosStmt2AsyncBind(__async_exec_fn_t execFn, void* execParam);
+bool    beginAsyncWorkShutdown();
+bool    mayCreateAsyncWork();
 
 void destroySendMsgInfo(SMsgSendInfo* pMsgBody);
 
@@ -380,8 +466,12 @@ int32_t queryBuildUseDbOutput(SUseDbOutput* pOut, SUseDbRsp* usedbRsp);
 void initQueryModuleMsgHandle();
 
 const SSchema* tGetTbnameColumnSchema();
-bool           tIsValidSchema(struct SSchema* pSchema, int32_t numOfCols, int32_t numOfTags);
+bool           tIsValidSchema(struct SSchema* pSchema, int32_t numOfCols, int32_t numOfTags, bool isVirtual);
 int32_t        getAsofJoinReverseOp(EOperatorType op);
+bool           hasDecimalBytesTypeInfo(int32_t bytes);
+void           schemaToRefDataType(const SSchema* pSchema, STypeMod typeMod, SDataType* pType);
+bool           isSameRefDataType(const SDataType* pLeft, const SDataType* pRight);
+int32_t        getNormalColSchemaIndex(const STableMeta* pTableMeta, const char* pColName);
 
 int32_t queryCreateCTableMetaFromMsg(STableMetaRsp* msg, SCTableMeta* pMeta);
 int32_t queryCreateVCTableMetaFromMsg(STableMetaRsp *msg, SVCTableMeta **pMeta);
@@ -394,20 +484,21 @@ SSchema createSchema(int8_t type, int32_t bytes, col_id_t colId, const char* nam
 void    destroyQueryExecRes(SExecResult* pRes);
 int32_t dataConverToStr(char* str, int64_t capacity, int type, void* buf, int32_t bufSize, int32_t* len);
 void    parseTagDatatoJson(void* p, char** jsonStr, void *charsetCxt);
-int32_t setColRef(SColRef* colRef, col_id_t colId, char* refColName, char* refTableName, char* refDbName);
+int32_t setColRef(SColRef* colRef, col_id_t colId, const char* colName, char* refColName, char* refTableName, char* refDbName);
 int32_t cloneTableMeta(STableMeta* pSrc, STableMeta** pDst);
 void    getColumnTypeFromMeta(STableMeta* pMeta, char* pName, ETableColumnType* pType);
 int32_t cloneDbVgInfo(SDBVgInfo* pSrc, SDBVgInfo** pDst);
 int32_t cloneSVreateTbReq(SVCreateTbReq* pSrc, SVCreateTbReq** pDst);
 void    freeVgInfo(SDBVgInfo* vgInfo);
 void    freeDbCfgInfo(SDbCfgInfo* pInfo);
+void    qDestroyBoundColInfo(void* pInfo);
 
 void tFreeStreamVtbOtbInfo(void* param);
 void tFreeStreamVtbVtbInfo(void* param);
 void tFreeStreamVtbDbVgInfo(void* param);
 
 extern int32_t (*queryBuildMsg[TDMT_MAX])(void* input, char** msg, int32_t msgSize, int32_t* msgLen,
-                                          void* (*mallocFp)(int64_t));
+                                          void* (*mallocFp)(int64_t), void (*freeFp)(void*));
 extern int32_t (*queryProcessMsgRsp[TDMT_MAX])(void* output, char* msg, int32_t msgSize);
 
 void* getTaskPoolWorkerCb();
@@ -464,6 +555,8 @@ void* getTaskPoolWorkerCb();
 #define IS_PERFORMANCE_SCHEMA_DB(_name) ((*(_name) == 'p') && (0 == strcmp(_name, TSDB_PERFORMANCE_SCHEMA_DB)))
 
 #define IS_SYS_DBNAME(_dbname) (IS_INFORMATION_SCHEMA_DB(_dbname) || IS_PERFORMANCE_SCHEMA_DB(_dbname))
+
+#define IS_SYS_PREFIX(_name) (_name[0] == 'S' && _name[1] == 'Y' && _name[2] == 'S')
 
 #define IS_AUDIT_DBNAME(_dbname)    ((*(_dbname) == 'a') && (0 == strcmp(_dbname, TSDB_AUDIT_DB)))
 #define IS_AUDIT_STB_NAME(_stbname) ((*(_stbname) == 'o') && (0 == strcmp(_stbname, TSDB_AUDIT_STB_OPERATION)))

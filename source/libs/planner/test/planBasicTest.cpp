@@ -30,6 +30,7 @@ TEST_F(PlanBasicTest, selectClause) {
   run("SELECT MAX(c1) c2, c2 FROM st1");
 }
 
+
 TEST_F(PlanBasicTest, whereClause) {
   useDb("root", "test");
 
@@ -73,6 +74,8 @@ TEST_F(PlanBasicTest, uniqueFunc) {
   run("SELECT UNIQUE(c1) a FROM t1 ORDER BY a");
 
   run("SELECT ts, UNIQUE(c1) FROM st1 PARTITION BY TBNAME");
+
+  run("SELECT ts, c2, UNIQUE(c1) FROM st1 PARTITION BY TBNAME ORDER BY TBNAME, ts, c2");
 
   run("SELECT TBNAME, UNIQUE(c1) FROM st1 PARTITION BY TBNAME");
 }
@@ -170,6 +173,7 @@ TEST_F(PlanBasicTest, pseudoColumn) {
 
   run("SELECT _TAGS, * FROM st1s1");
 }
+
 
 TEST_F(PlanBasicTest, indefiniteRowsFunc) {
   useDb("root", "test");

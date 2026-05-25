@@ -53,6 +53,7 @@
 (void)mndGetOrCreateRebSub
 (void)mndPullupArbUpdateGroupBatch
 (void)mndRefreshUserIpWhiteList
+(void)mndRefreshUserDateTimeWhiteList
 (void)mndSendArbHeartBeatReq
 (void)mndUpdClusterInfo
 (void)mndUpdateArbHeartBeat
@@ -218,7 +219,7 @@
 (void)tSerializeSUseDbRsp
 (void)tSerializeSVDropTtlTableReq
 (void)tSerializeSVKillCompactReq
-(void)tSerializeSVS3MigrateDbReq
+(void)tSerializeSVSsMigrateDbReq
 (void)tSerializeSVTrimDbReq
 (void)tSimpleHashIterateRemove
 (void)tSimpleHashPut

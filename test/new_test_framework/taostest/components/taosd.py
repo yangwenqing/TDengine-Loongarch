@@ -4,11 +4,14 @@ from ..util.common import TDCom
 from ..frame import *
 from threading import Thread
 import winrm
+import ctypes
+import psutil
 import os
 import time
 import re
 import platform
 import subprocess
+from new_test_framework.utils.server.win_process import start_taosd_windows, stop_taosd_windows
 try:
     import taos
 except:
@@ -87,7 +90,8 @@ class TaosD:
         tmp_dir=os.path.join(tmp_dir, cfg["fqdn"] + "_" + cfg["serverPort"])
         dict2file(tmp_dir, "taos.cfg", cfg)
         self._remote.mkdir(cfg["fqdn"], dnode["config_dir"])
-        self._remote.mkdir(cfg["fqdn"], "/var/log/valgrind")
+        if self.taosd_valgrind:
+            self._remote.mkdir(cfg["fqdn"], "/var/log/valgrind")
         taosd_path = dnode["taosdPath"] if "taosdPath" in dnode else "/usr/bin/taosd"
         error_output = dnode["asanDir"] if "asanDir" in dnode else None
         if "dataDir" in cfg:
@@ -102,7 +106,13 @@ class TaosD:
         cfgPath = os.path.join(tmp_dir, "taos.cfg")
         self._remote.put(cfg["fqdn"], cfgPath, dnode["config_dir"])
         createDnode = "show dnodes"
-    
+        
+        # Generate encryption keys on remote server (after config uploaded, before taosd starts)
+        if index == 0:
+            self.logger.debug(f"dnode {dnode['endpoint']} is the first dnode, generate encryption keys")
+            self._generate_encrypt_keys_on_remote(dnode, cfg)
+        else:
+            self.logger.debug(f"dnode {dnode['endpoint']} is not the first dnode, skip generating encryption keys")
         
         # valgrind_cmdline = f"valgrind --log-file=/var/log/valgrind/valgrind_{self.run_time}/valgrind.log --tool=memcheck --leak-check=full --show-reachable=no --track-origins=yes --show-leak-kinds=all -v --workaround-gcc296-bugs=yes"
         valgrind_cmdline = f"valgrind --log-file={self._run_log_dir}/valgrind_taosd.log --tool=memcheck --leak-check=full --show-reachable=no --track-origins=yes --show-leak-kinds=all -v --workaround-gcc296-bugs=yes"
@@ -112,21 +122,34 @@ class TaosD:
             start_cmd = f"screen -L -d -m {valgrind_cmdline} {taosd_path} -c {dnode['config_dir']}  "
         else:
             if error_output:
-                start_cmd = f"screen -L -d -m {taosd_path} -c {dnode['config_dir']} 2>{error_output}"
+                # do NOT set abort_on_error=1: it causes taosd to crash immediately on any ASAN
+                # error, making tmq_sim / polling loops hang forever waiting for a dead taosd.
+                # ASAN errors are still written to error_output and caught by checkAsan.sh.
+                asan_options = [
+                    "detect_odr_violation=0",
+                ]
+                cmds = [
+                    'export LD_PRELOAD="$(realpath $(gcc -print-file-name=libasan.so)) '
+                    '$(realpath $(gcc -print-file-name=libstdc++.so))"',
+                    f'export ASAN_OPTIONS="{":".join(asan_options)}"',
+                    f'{taosd_path} -c {dnode["config_dir"]} 2>{error_output}',
+                ]
+                run_cmd = " && ".join(cmds)
+                start_cmd = f"screen -d -m bash -c '{run_cmd}'"
+                self._remote.cmd(cfg["fqdn"], ["ulimit -n 1048576", start_cmd])
             else:
-                start_cmd = f"screen -L -d -m {taosd_path} -c {dnode['config_dir']}  "
-        self._remote.cmd(cfg["fqdn"],
-                         ["ulimit -n 1048576",
-                          start_cmd,
-                          "sleep 0.1",
-                          "taos -c {0} -s \"{1}\";".format(dnode["config_dir"], createDnode)])
+                if platform.system().lower() == "windows":
+                    start_taosd_windows(taosd_path, dnode['config_dir'], log=self.logger)
+                else:
+                    start_cmd = f"screen -L -d -m {taosd_path} -c {dnode['config_dir']}  "
+                    self._remote.cmd(cfg["fqdn"], ["ulimit -n 1048576", start_cmd])
         
         if self.taosd_valgrind == 0:
             time.sleep(0.1)
             if index == 0:
                 key = 'from offline to online'
                 bkey = bytes(key, encoding="utf8")
-                logFile = self._run_log_dir + "/taosdlog.0"
+                logFile = os.path.join(self._run_log_dir, "taosdlog.0")
                 i = 0
                 while not os.path.exists(logFile):
                     time.sleep(0.1)
@@ -142,31 +165,149 @@ class TaosD:
                         if time.time() > timeout:
                             self.logger.error('wait too long for taosd start')
                             break
-                    self.logger.debug("the dnode:%d has been started." % (index))
+                self.logger.debug("the dnode:%d has been started." % (index))
+                # Probe the connection until taosd is truly ready to serve queries.
+                # "from offline to online" only means the dnode joined the cluster;
+                # the mnode Raft leader may still be restoring (0x0914) for several
+                # more seconds, especially under CI pressure load or with multi-node
+                # clusters.  Keep retrying until the connection succeeds or 60 s elapse.
+                _probe_host = cfg.get("fqdn", "localhost")
+                _probe_port = int(cfg.get("serverPort", 6030))
+                _probe_deadline = time.time() + 60
+                while time.time() < _probe_deadline:
+                    try:
+                        _conn = taos.connect(host=_probe_host, port=_probe_port)
+                        _conn.close()
+                        self.logger.debug("taosd ready (connection probe OK) dnode:%d" % index)
+                        break
+                    except Exception as _probe_err:
+                        self.logger.debug(
+                            "taosd not ready yet dnode:%d (%s), retrying in 1s ..." % (index, _probe_err)
+                        )
+                        time.sleep(1)
+                else:
+                    self.logger.error(
+                        "taosd connection probe timed out after 60s for dnode:%d" % index
+                    )
         else:
             self.logger.debug(
                 "wait 10 seconds for the dnode:%d to start." %(index))
             time.sleep(10)
 
-    def configure_and_start(self, tmp_dir, nodeDict):
-        threads = []
+    def _generate_encrypt_keys_on_remote(self, dnode, cfg):
+        print(f"Generating encryption keys on remote server for dnode")
+        """
+        Generate encryption keys on remote server before starting taosd
+        
+        This method executes taosk on the remote server to generate encryption keys.
+        Called after config directory is created and taos.cfg is uploaded,
+        but before taosd starts.
+        
+        All keys are optional and will be auto-generated by taosk if not specified.
+        """
+        try:
+            # Check if encryption is needed
+            need_encrypt = False
+            svr_key = None
+            db_key = None
+            data_key = None
+            generate_config = True
+            generate_meta = True
+            generate_data = True
+            
+            # Check dnode config for encryption settings
+            if "encrypt" in dnode.get("config", {}):
+                need_encrypt = True
+                encrypt_cfg = dnode["config"]["encrypt"]
+                if isinstance(encrypt_cfg, dict):
+                    svr_key = encrypt_cfg.get("svrKey")
+                    db_key = encrypt_cfg.get("dbKey")
+                    data_key = encrypt_cfg.get("dataKey")
+                    generate_config = encrypt_cfg.get("generateConfig", True)
+                    generate_meta = encrypt_cfg.get("generateMeta", True)
+                    generate_data = encrypt_cfg.get("generateData", True)
+            
+            # Alternative: check for individual key settings
+            if "svrKey" in dnode.get("config", {}):
+                need_encrypt = True
+                svr_key = dnode["config"]["svrKey"]
+                db_key = dnode["config"].get("dbKey")
+                data_key = dnode["config"].get("dataKey")
+            
+            if not need_encrypt:
+                return
+            
+            config_dir = dnode["config_dir"]
+            fqdn = cfg["fqdn"]
+            
+            # Find taosk binary path on remote server
+            print(f"taosd path: {dnode['taosdPath']}")
+            taosdPath = dnode['taosdPath']
+            parentPath = os.path.dirname(taosdPath)
+            taosk_name = "taosk.exe" if platform.system().lower() == "windows" else "taosk"
+            taosk_path = os.path.join(parentPath, taosk_name)
+            system_platform = dnode.get("system", "Linux").lower()
 
+            if not os.path.exists(taosk_path):
+                if system_platform == "windows":
+                    self.logger.warning("Skip encryption key generation: "
+                        f"taosk is not supported on {system_platform} system")
+                else:
+                    self.logger.error(f"taosk not found at: {taosk_path}, "
+                        f"system platform: {system_platform}")
+                return
+            
+            # Build taosk command to execute on remote server
+            cmd_parts = [taosk_path, '-c', config_dir]
+            
+            # Add server key (optional, auto-generated if not provided)
+            if svr_key:
+                cmd_parts.extend(['--encrypt-server', svr_key])
+            else:
+                cmd_parts.append('--encrypt-server')
+            
+            # Add database key (optional, auto-generated if not provided)
+            if db_key:
+                cmd_parts.extend(['--encrypt-database', db_key])
+            else:
+                cmd_parts.append('--encrypt-database')
+            
+            # Add optional flags
+            if generate_config:
+                cmd_parts.append('--encrypt-config')
+            
+            if generate_meta:
+                cmd_parts.append('--encrypt-metadata')
+            
+            if generate_data:
+                if data_key:
+                    cmd_parts.extend(['--encrypt-data', data_key])
+                else:
+                    cmd_parts.append('--encrypt-data')
+            
+            taosk_cmd = ' '.join(cmd_parts)
+            
+            self.logger.info(f"Generating encryption keys on {fqdn}: {taosk_cmd}")
+            
+            # Execute taosk on remote server
+            result = self._remote.cmd(fqdn, [taosk_cmd])
+            
+            if result is not None:
+                self.logger.info(f"Encryption keys generated on {fqdn}: {result}")
+            else:
+                self.logger.error(f"Failed to generate encryption keys on {fqdn}")
+                
+        except Exception as e:
+            self.logger.warning(f"Error generating encryption keys on {fqdn}: {e}")
+
+    def configure_and_start(self, tmp_dir, nodeDict):
         # 调试信息，检查 nodeDict["spec"]["dnodes"] 的内容
         self.logger.debug(f"nodeDict['spec']['dnodes']: {nodeDict['spec']['dnodes']}")
 
         for index, dnode in enumerate(nodeDict["spec"]["dnodes"]):
             common_cfg: dict = nodeDict["spec"]["config"] if 'config' in nodeDict['spec'] else {
             }
-            if "system" in dnode.keys() and dnode["system"].lower() == "windows":
-                t = Thread(target = self._configure_and_start_windows, args = (tmp_dir, dnode, common_cfg))
-                pass
-            else:
-                #t = Thread(target = self._configure_and_start, args = (tmp_dir, dnode, common_cfg))
-                self._configure_and_start(tmp_dir, dnode, common_cfg, index)
-            #t.start()
-            #threads.append(t)
-        #for thread in threads:
-            #thread.join()
+            self._configure_and_start(tmp_dir, dnode, common_cfg, index)
 
     def update_taosd(self, nodeDict):
         for dnode in nodeDict["spec"]["dnodes"]:
@@ -236,13 +377,15 @@ class TaosD:
                     cfg: dict = dnode["config"] if 'config' in dnode else {}
                     # cat /proc/sys/kernel/core_pattern
                     # scp coredump files to logDir/data/{fqdn}/coredump
-                    coreDir = "{}/data/{}/coredump".format(logDir, host)
-                    os.system("mkdir -p {}".format(coreDir))
-                    corePattern = self._remote.cmd(host, ["cat /proc/sys/kernel/core_pattern"])
-                    if not corePattern is None:
-                        dirName = os.path.dirname(corePattern)
-                        if dirName.startswith("/"):
-                            self._remote.get(host, dirName, coreDir)
+                    system_platform = dnode["system"] if "system" in dnode.keys() else "linux"
+                    if system_platform.lower() == "linux":
+                        coreDir = "{}/data/{}/coredump".format(logDir, host)
+                        os.system("mkdir -p {}".format(coreDir))
+                        corePattern = self._remote.cmd(host, ["cat /proc/sys/kernel/core_pattern"])
+                        if not corePattern is None:
+                            dirName = os.path.dirname(corePattern)
+                            if dirName.startswith("/"):
+                                self._remote.get(host, dirName, coreDir)
                     # default data dir & log dir
                     remoteDataDir = "/var/lib/taos"
                     remoteLogDir = "/var/log/taos"
@@ -322,31 +465,58 @@ class TaosD:
             nodeDictList = [nodeDict["spec"]["dnodes"], nodeDict["spec"]["reserve_dnodes"]]
         nodeDictList = [nodeDict["spec"]["dnodes"], nodeDict["spec"]["reserve_dnodes"]] if "reserve_dnodes" in nodeDict["spec"] else [nodeDict["spec"]["dnodes"]]
         for dnodeList in nodeDictList:
-
             for i in dnodeList:
                 fqdn, _ = i["endpoint"].split(":")
-                if "system" in i.keys() and i["system"].lower() == "windows":
-                    win_taosd=winrm.Session(f'http://{fqdn}:5985/wsman',auth=('administrator','tbase125!'))
-                    win_taosd.run_cmd("taskkill -f /im taosd.exe")
-                    win_taosd.run_cmd("sc delete 'taosd'")
-                    for dir in (i["config_dir"], i["config"]["dataDir"], i["config"]["logDir"]):
-                        dir_win = dir.replace('/','\\')
-                        win_taosd.run_cmd(f"rd /S /Q {dir_win}")
+                if platform.system().lower() == "windows":
+                    if "asanDir" in i:
+                        self.logger.info("Windows not support asanDir yet")
+                    else:
+                        self.logger.debug("destroy taosd on windows")
+                        if fqdn == self._local_host or fqdn == "localhost":
+                            stop_taosd_windows(config_dir=i["config_dir"], log=self.logger)
+                        else:
+                            # 远程 Windows：通过 cmd_windows 查找并停止 taosd
+                            killCmd = f'wmic process where "name=\'taosd.exe\' and CommandLine like \'%{i["config_dir"]}%\'" call terminate'
+                            self._remote.cmd_windows(fqdn, [killCmd])
 
                 else:
                     if "asanDir" in i:
                         if fqdn == "localhost":
-                            killCmd = ["ps -ef | grep -w %s | grep -v grep | awk '{print $2}' | xargs kill " % nodeDict["name"]]
+                            killCmd = ["ps -efww | grep -w %s | grep -v grep | awk '{print $2}' | xargs kill " % nodeDict["name"]]
                             env = os.environ.copy()
                             env.pop('LD_PRELOAD', None)
                             subprocess.run(killCmd, shell=True, text=True, env=env)
                         else:
-                            killCmd = ["ps -ef | grep -w %s | grep -v grep | awk '{print $2}' | xargs kill " % nodeDict["name"]]
+                            killCmd = ["ps -efww | grep -w %s | grep -v grep | awk '{print $2}' | xargs kill " % nodeDict["name"]]
                             self._remote.cmd(fqdn, killCmd)
                     else:
-                        killCmd = [
-                            "ps -ef | grep -wi %s | grep -v grep | awk '{print $2}' | xargs kill -9 > /dev/null 2>&1" % nodeDict["name"]]
-                        self._remote.cmd(fqdn, killCmd)
+                        check_cmd = f"ps -efww | grep -wi {nodeDict['name']} | grep {i['config_dir']} | grep -v grep | wc -l"
+                        result = self._remote.cmd(fqdn, [check_cmd])
+                        if int(result[0].strip()) > 0:
+                            killCmd = [
+                                f"ps -efww | grep -wi {nodeDict['name']} | grep {i['config_dir']} | grep -v grep | awk '{{print $2}}' | xargs kill -9 > /dev/null 2>&1"]
+                            self._remote.cmd(fqdn, killCmd)
+
+                    # if "system" in i.keys() and i["system"].lower() == "darwin":
+                    #     stop_service_cmd = "launchctl unload /Library/LaunchDaemons/com.taosdata.taosd.plist"
+                    # else:
+                    #     stop_service_cmd = "systemctl is-active taosd && systemctl stop taosd || true"
+                    # self.logger.debug(f"Executing stop command on {fqdn}: {stop_service_cmd}")
+                    # self._remote.cmd(fqdn, [stop_service_cmd])
+
+                    # get_and_kill_cmd = (
+                    #     "ps -efww | grep '[t]aosd' | grep -v grep | awk '{print $2}' | "
+                    #     "while read pid; do "
+                    #     "if kill -0 $pid 2>/dev/null; then "
+                    #     "echo Killing taosd process with PID: $pid; "
+                    #     "kill -9 $pid; "
+                    #     "fi; "
+                    #     "done"
+                    # )
+                    # self.logger.debug(f"Executing get and kill command on {fqdn}: {get_and_kill_cmd}")
+                    # output=self._remote.cmd(fqdn, [get_and_kill_cmd])
+                    # self.logger.info(f"Kill log on {fqdn}:{output}")
+                    
                     if self.taosd_valgrind and not self.taosc_valgrind:
                         killCmd = [
                             "ps -ef|grep -wi valgrind.bin | grep -v grep | awk '{print $2}' | xargs kill -9 > /dev/null 2>&1"]

@@ -165,20 +165,20 @@ func (a *Adapter) tableName(endpoint string, reqType adapterReqType) string {
 }
 
 func (a *Adapter) createDatabase() error {
-	qid := util.GetQidOwn()
+	qid := util.GetQidOwn(config.Conf.InstanceID)
 
 	adapterLog := adapterLog.WithFields(
 		logrus.Fields{config.ReqIDKey: qid},
 	)
 
-	conn, err := db.NewConnector(a.username, a.password, a.host, a.port, a.usessl)
+	conn, err := db.NewConnectorWithRetryForever(a.username, a.password, a.host, a.port, a.usessl)
 	if err != nil {
 		return fmt.Errorf("connect to database error, msg:%s", err)
 	}
 	defer func() { _ = conn.Close() }()
 	sql := a.createDBSql()
 	adapterLog.Infof("create database, sql:%s", sql)
-	_, err = conn.Exec(context.Background(), sql, util.GetQidOwn())
+	_, err = conn.ExecWithRetryForever(context.Background(), sql, util.GetQidOwn(config.Conf.InstanceID))
 	if err != nil {
 		adapterLog.Errorf("create database error, msg:%s", err)
 		return err
@@ -228,8 +228,45 @@ func (a *Adapter) createTable() error {
 	if a.conn == nil {
 		return errNoConnection
 	}
-	_, err := a.conn.Exec(context.Background(), adapterTableSql, util.GetQidOwn())
-	return err
+	if _, err := a.conn.ExecWithRetryForever(context.Background(), adapterTableSql, util.GetQidOwn(config.Conf.InstanceID)); err != nil {
+		return err
+	}
+	return a.alterSTable()
+}
+
+func (a *Adapter) alterSTable() error {
+	qid := util.GetQidOwn(config.Conf.InstanceID)
+	result, err := a.conn.QueryWithRetryForever(context.Background(), "desc adapter_requests", qid)
+	if err != nil {
+		adapterLog.Errorf("desc stable adapter_requests error, msg:%v", err)
+		return err
+	}
+
+	needAlterEndpoint := false
+	for _, row := range result.Data {
+		if row[0] == "endpoint" {
+			if colLen, ok := row[2].(int32); ok {
+				if colLen < 255 {
+					needAlterEndpoint = true
+				}
+			} else {
+				adapterLog.Errorf("unexpected type for endpoint length: %T", row[2])
+				return fmt.Errorf("failed to get endpoint tag length: unexpected type/value %T (%v)", row[2], row[2])
+			}
+			break
+		}
+	}
+
+	if needAlterEndpoint {
+		alterSql := "alter stable adapter_requests modify tag endpoint varchar(255)"
+		adapterLog.Info("alter endpoint tag to varchar(255)")
+		if _, err := a.conn.ExecWithRetryForever(context.Background(), alterSql, qid); err != nil {
+			adapterLog.Errorf("alter stable adapter_requests error, sql:%s, msg:%s", alterSql, err)
+			return err
+		}
+	}
+
+	return nil
 }
 
 type AdapterReport struct {

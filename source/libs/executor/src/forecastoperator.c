@@ -19,11 +19,11 @@
 #include "operator.h"
 #include "querytask.h"
 #include "tanalytics.h"
+#include "taoserror.h"
 #include "tcommon.h"
-#include "tcompare.h"
 #include "tdatablock.h"
-#include "tfill.h"
-#include "ttime.h"
+#include "tmsg.h"
+#include "tmsg.h"
 
 #ifdef USE_ANALYTICS
 
@@ -34,9 +34,16 @@
 #define ALGO_OPT_EVERY_NAME        "every"
 
 typedef struct {
+  char*           pName;
+  SColumnInfoData data;
+  SColumn         col;
+  int32_t         numOfRows;
+} SColFutureData;
+
+typedef struct {
   char         algoName[TSDB_ANALYTIC_ALGO_NAME_LEN];
   char         algoUrl[TSDB_ANALYTIC_ALGO_URL_LEN];
-  char         algoOpt[TSDB_ANALYTIC_ALGO_OPTION_LEN];
+  char*        pOptions;
   int64_t      maxTs;
   int64_t      minTs;
   int64_t      numOfRows;
@@ -60,6 +67,7 @@ typedef struct {
   int8_t       setStart;
   int8_t       setEvery;
   SArray*      pCovariateSlotList;   // covariate slot list
+  SArray*      pDynamicRealList;     // dynamic real data list
   int32_t      numOfInputCols;
   SAnalyticBuf analyBuf;
 } SForecastSupp;
@@ -70,7 +78,7 @@ typedef struct SForecastOperatorInfo {
   SForecastSupp forecastSupp;
 } SForecastOperatorInfo;
 
-static void destroyForecastInfo(void* param);
+static void    destroyForecastInfo(void* param);
 static int32_t forecastParseOpt(SForecastSupp* pSupp, const char* id);
 
 static FORCE_INLINE int32_t forecastEnsureBlockCapacity(SSDataBlock* pBlock, int32_t newRowsNum) {
@@ -112,23 +120,39 @@ static int32_t forecastCacheBlock(SForecastSupp* pSupp, SSDataBlock* pBlock, con
     char*   val = colDataGetData(pValCol, j);
     int16_t valType = pValCol->info.type;
 
-    pSupp->minTs = MIN(pSupp->minTs, ts);
-    pSupp->maxTs = MAX(pSupp->maxTs, ts);
+    pSupp->minTs = TMIN(pSupp->minTs, ts);
+    pSupp->maxTs = TMAX(pSupp->maxTs, ts);
     pSupp->numOfRows++;
 
+    // write the primary time stamp column data
     code = taosAnalyBufWriteColData(pBuf, index++, TSDB_DATA_TYPE_TIMESTAMP, &ts);
     if (TSDB_CODE_SUCCESS != code) {
       qError("%s failed to write ts in buf, code:%s", id, tstrerror(code));
       return code;
     }
 
+    // write the main column for forecasting
     code = taosAnalyBufWriteColData(pBuf, index++, valType, val);
     if (TSDB_CODE_SUCCESS != code) {
       qError("%s failed to write val in buf, code:%s", id, tstrerror(code));
       return code;
     }
 
-    for (int32_t i = 0; i < pSupp->numOfInputCols - 2; ++i) {
+    // let's handle the dynamic_real_columns
+    for (int32_t i = 0; i < taosArrayGetSize(pSupp->pDynamicRealList); ++i) {
+      SColFutureData*  pCol = taosArrayGet(pSupp->pDynamicRealList, i);
+      SColumnInfoData* pColData = taosArrayGet(pBlock->pDataBlock, pCol->col.slotId);
+
+      char* pVal = colDataGetData(pColData, j);
+      code = taosAnalyBufWriteColData(pBuf, index++, pCol->col.type, pVal);
+      if (TSDB_CODE_SUCCESS != code) {
+        qError("%s failed to write val in buf, code:%s", id, tstrerror(code));
+        return code;
+      }
+    }
+
+    // now handle the past_dynamic_real columns and
+    for (int32_t i = 0; i < taosArrayGetSize(pSupp->pCovariateSlotList); ++i) {
       SColumn*         pCol = taosArrayGet(pSupp->pCovariateSlotList, i);
       SColumnInfoData* pColData = taosArrayGet(pBlock->pDataBlock, pCol->slotId);
 
@@ -148,7 +172,23 @@ static int32_t forecastCloseBuf(SForecastSupp* pSupp, const char* id) {
   SAnalyticBuf* pBuf = &pSupp->analyBuf;
   int32_t       code = 0;
 
+  // add the future dynamic real column data
+
   for (int32_t i = 0; i < pSupp->numOfInputCols; ++i) {
+    // the primary timestamp and the forecast column
+    // add the future dynamic real column data
+    if ((i >= 2) && ((i - 2) < taosArrayGetSize(pSupp->pDynamicRealList))) {
+      SColFutureData* pCol = taosArrayGet(pSupp->pDynamicRealList, i - 2);
+      int16_t         valType = pCol->col.type;
+      for (int32_t j = 0; j < pCol->numOfRows; ++j) {
+        char* pVal = colDataGetData(&pCol->data, j);
+        code = taosAnalyBufWriteColData(pBuf, i, valType, pVal);
+        if (code != 0) {
+          return code;
+        }
+      }
+    }
+
     code = taosAnalyBufWriteColEnd(pBuf, i);
     if (code != 0) return code;
   }
@@ -156,7 +196,7 @@ static int32_t forecastCloseBuf(SForecastSupp* pSupp, const char* id) {
   code = taosAnalyBufWriteDataEnd(pBuf);
   if (code != 0) return code;
 
-  code = taosAnalyBufWriteOptStr(pBuf, "option", pSupp->algoOpt);
+  code = taosAnalyBufWriteOptStr(pBuf, "option", pSupp->pOptions);
   if (code != 0) return code;
 
   code = taosAnalyBufWriteOptStr(pBuf, "algo", pSupp->algoName);
@@ -181,13 +221,19 @@ static int32_t forecastCloseBuf(SForecastSupp* pSupp, const char* id) {
     return TSDB_CODE_ANA_ANODE_NOT_ENOUGH_ROWS;
   }
 
+  if (pSupp->cachedRows < ANALY_TDTSFM_FORECAST_MIN_ROWS && strcmp(pSupp->algoName, "tdtsfm_1") == 0) {
+    qError("%s history rows for forecasting when using tdtsfm model not enough, min required:%d, current:%" PRId64, id,
+           ANALY_TDTSFM_FORECAST_MIN_ROWS, pSupp->forecastRows);
+    return TSDB_CODE_ANA_ANODE_NOT_ENOUGH_ROWS;
+  }
+
   code = taosAnalyBufWriteOptInt(pBuf, "forecast_rows", pSupp->forecastRows);
   if (code != 0) return code;
 
   code = taosAnalyBufWriteOptFloat(pBuf, "conf", pSupp->conf);
   if (code != 0) return code;
 
-  int32_t len = strlen(pSupp->algoOpt);
+  int32_t len = strlen(pSupp->pOptions);
   int64_t every = (pSupp->setEvery != 0) ? pSupp->every : ((pSupp->maxTs - pSupp->minTs) / (pSupp->numOfRows - 1));
   code = taosAnalyBufWriteOptInt(pBuf, "every", every);
   if (code != 0) return code;
@@ -196,7 +242,7 @@ static int32_t forecastCloseBuf(SForecastSupp* pSupp, const char* id) {
   code = taosAnalyBufWriteOptInt(pBuf, "start", start);
   if (code != 0) return code;
 
-  if (taosArrayGetSize(pSupp->pCovariateSlotList) > 0) {
+  if (taosArrayGetSize(pSupp->pCovariateSlotList) + taosArrayGetSize(pSupp->pDynamicRealList) > 0) {
     code = taosAnalyBufWriteOptStr(pBuf, "type", "covariate");
     if (code != 0) return code;
   }
@@ -208,11 +254,7 @@ static int32_t forecastCloseBuf(SForecastSupp* pSupp, const char* id) {
 static int32_t forecastAnalysis(SForecastSupp* pSupp, SSDataBlock* pBlock, const char* pId) {
   SAnalyticBuf* pBuf = &pSupp->analyBuf;
   int32_t       resCurRow = pBlock->info.rows;
-  int8_t        tmpI8 = 0;
-  int16_t       tmpI16 = 0;
-  int32_t       tmpI32 = 0;
   int64_t       tmpI64 = 0;
-  float         tmpFloat = 0;
   double        tmpDouble = 0;
   int32_t       code = 0;
 
@@ -227,7 +269,7 @@ static int32_t forecastAnalysis(SForecastSupp* pSupp, SSDataBlock* pBlock, const
   SColumnInfoData* pResHighCol =
       (pSupp->resHighSlot != -1 ? taosArrayGet(pBlock->pDataBlock, pSupp->resHighSlot) : NULL);
 
-  SJson* pJson = taosAnalySendReqRetJson(pSupp->algoUrl, ANALYTICS_HTTP_TYPE_POST, pBuf, pSupp->timeout * 1000);
+  SJson* pJson = taosAnalySendReqRetJson(pSupp->algoUrl, ANALYTICS_HTTP_TYPE_POST, pBuf, pSupp->timeout, pId);
   if (pJson == NULL) {
     return terrno;
   }
@@ -235,19 +277,13 @@ static int32_t forecastAnalysis(SForecastSupp* pSupp, SSDataBlock* pBlock, const
   int32_t rows = 0;
   tjsonGetInt32ValueFromDouble(pJson, "rows", rows, code);
   if (rows < 0 && code == 0) {
-    char pMsg[1024] = {0};
-    code = tjsonGetStringValue(pJson, "msg", pMsg);
-    if (code != 0) {
-      qError("%s failed to get msg from rsp, unknown error", pId);
-    } else {
-      qError("%s failed to exec forecast, msg:%s", pId, pMsg);
-    }
-
+    code = parseErrorMsgFromAnalyticServer(pJson, "forecast", pId);
     tjsonDelete(pJson);
-    return TSDB_CODE_ANA_ANODE_RETURN_ERROR;
+    return code;
   }
 
-  if (code < 0) {
+  // invalid json format
+  if (code != 0) {
     goto _OVER;
   }
 
@@ -283,8 +319,7 @@ static int32_t forecastAnalysis(SForecastSupp* pSupp, SSDataBlock* pBlock, const
     for (int32_t i = 0; i < lowSize; ++i) {
       SJson* lowJson = tjsonGetArrayItem(lowJsonArray, i);
       tjsonGetObjectValueDouble(lowJson, &tmpDouble);
-      tmpFloat = (float)tmpDouble;
-      colDataSetFloat(pResLowCol, resCurRow, &tmpFloat);
+      colDataSetDouble(pResLowCol, resCurRow, &tmpDouble);
       resCurRow++;
     }
   }
@@ -298,8 +333,7 @@ static int32_t forecastAnalysis(SForecastSupp* pSupp, SSDataBlock* pBlock, const
     for (int32_t i = 0; i < highSize; ++i) {
       SJson* highJson = tjsonGetArrayItem(highJsonArray, i);
       tjsonGetObjectValueDouble(highJson, &tmpDouble);
-      tmpFloat = (float)tmpDouble;
-      colDataSetFloat(pResHighCol, resCurRow, &tmpFloat);
+      colDataSetDouble(pResHighCol, resCurRow, &tmpDouble);
       resCurRow++;
     }
   }
@@ -313,46 +347,7 @@ static int32_t forecastAnalysis(SForecastSupp* pSupp, SSDataBlock* pBlock, const
     SJson* valJson = tjsonGetArrayItem(valJsonArray, i);
     tjsonGetObjectValueDouble(valJson, &tmpDouble);
 
-    switch (pSupp->targetValType) {
-      case TSDB_DATA_TYPE_BOOL:
-      case TSDB_DATA_TYPE_UTINYINT:
-      case TSDB_DATA_TYPE_TINYINT: {
-        tmpI8 = (int8_t)tmpDouble;
-        colDataSetInt8(pResValCol, resCurRow, &tmpI8);
-        break;
-      }
-      case TSDB_DATA_TYPE_USMALLINT:
-      case TSDB_DATA_TYPE_SMALLINT: {
-        tmpI16 = (int16_t)tmpDouble;
-        colDataSetInt16(pResValCol, resCurRow, &tmpI16);
-        break;
-      }
-      case TSDB_DATA_TYPE_INT:
-      case TSDB_DATA_TYPE_UINT: {
-        tmpI32 = (int32_t)tmpDouble;
-        colDataSetInt32(pResValCol, resCurRow, &tmpI32);
-        break;
-      }
-      case TSDB_DATA_TYPE_TIMESTAMP:
-      case TSDB_DATA_TYPE_UBIGINT:
-      case TSDB_DATA_TYPE_BIGINT: {
-        tmpI64 = (int64_t)tmpDouble;
-        colDataSetInt64(pResValCol, resCurRow, &tmpI64);
-        break;
-      }
-      case TSDB_DATA_TYPE_FLOAT: {
-        tmpFloat = (float)tmpDouble;
-        colDataSetFloat(pResValCol, resCurRow, &tmpFloat);
-        break;
-      }
-      case TSDB_DATA_TYPE_DOUBLE: {
-        colDataSetDouble(pResValCol, resCurRow, &tmpDouble);
-        break;
-      }
-      default:
-        code = TSDB_CODE_FUNC_FUNTION_PARA_TYPE;
-        goto _OVER;
-    }
+    colDataSetDouble(pResValCol, resCurRow, &tmpDouble);
     resCurRow++;
   }
 
@@ -400,6 +395,7 @@ static int32_t forecastNext(SOperatorInfo* pOperator, SSDataBlock** ppRes) {
   SForecastOperatorInfo* pInfo = pOperator->info;
   SSDataBlock*           pResBlock = pInfo->pRes;
   SForecastSupp*         pSupp = &pInfo->forecastSupp;
+  SExprSupp*             pScalarSupp = &pInfo->scalarSup;
   SAnalyticBuf*          pBuf = &pSupp->analyBuf;
   int64_t                st = taosGetTimestampUs();
   int32_t                numOfBlocks = pSupp->numOfBlocks;
@@ -411,6 +407,14 @@ static int32_t forecastNext(SOperatorInfo* pOperator, SSDataBlock** ppRes) {
     SSDataBlock* pBlock = getNextBlockFromDownstream(pOperator, 0);
     if (pBlock == NULL) {
       break;
+    }
+
+    if (pScalarSupp->pExprInfo != NULL) {
+      code = projectApplyFunctions(pScalarSupp->pExprInfo, pBlock, pBlock, pScalarSupp->pCtx, pScalarSupp->numOfExprs,
+                                   NULL, GET_STM_RTINFO(pOperator->pTaskInfo));
+      if (code != TSDB_CODE_SUCCESS) {
+        T_LONG_JMP(pTaskInfo->env, code);
+      }
     }
 
     if (pSupp->groupId == 0 || pSupp->groupId == pBlock->info.id.groupId) {
@@ -487,48 +491,73 @@ static int32_t forecastParseOutput(SForecastSupp* pSupp, SExprSupp* pExprSup) {
 
 static int32_t validInputParams(SFunctionNode* pFunc, const char* id) {
   int32_t code = 0;
-  int32_t lino = 0;
   int32_t num = LIST_LENGTH(pFunc->pParameterList);
 
-  TSDB_CHECK_CONDITION(num > 1, code, lino, _end, TSDB_CODE_PLAN_INTERNAL_ERROR);
+  if (num <= 1) {
+    qError("%s invalid number of parameters:%d", id, num);
+    code = TSDB_CODE_PLAN_INTERNAL_ERROR;
+    goto _end;
+  }
 
   for (int32_t i = 0; i < num; ++i) {
     SNode* p = nodesListGetNode(pFunc->pParameterList, i);
-    TSDB_CHECK_NULL(p, code, lino, _end, TSDB_CODE_PLAN_INTERNAL_ERROR)
+    if (p == NULL) {
+      code = TSDB_CODE_PLAN_INTERNAL_ERROR;
+      qError("%s %d-th parameter in forecast function is NULL, code:%s", id, i, tstrerror(code));
+      goto _end;
+    }
   }
 
   if (num == 2) {  // column_name, timestamp_column_name
     SNode* p1 = nodesListGetNode(pFunc->pParameterList, 0);
     SNode* p2 = nodesListGetNode(pFunc->pParameterList, 1);
 
-    TSDB_CHECK_CONDITION(p1->type == QUERY_NODE_COLUMN, code, lino, _end, TSDB_CODE_PLAN_INTERNAL_ERROR);
-    TSDB_CHECK_CONDITION(p2->type == QUERY_NODE_COLUMN, code, lino, _end, TSDB_CODE_PLAN_INTERNAL_ERROR);
-  } else if (num >= 3) {  // column_name_#1, column_name_#2...., analytics_options, timestamp_column_name
-    for (int32_t i = 0; i < num - 2; ++i) {
-      SNode* p1 = nodesListGetNode(pFunc->pParameterList, i);
-      if (p1->type != QUERY_NODE_COLUMN) {
-        code = TSDB_CODE_PLAN_INTERNAL_ERROR;
-        goto _end;
-      }
+    if (nodeType(p1) != QUERY_NODE_COLUMN || nodeType(p2) != QUERY_NODE_COLUMN) {
+      qError("%s invalid column type, column 1:%d, column 2:%d", id, nodeType(p1), nodeType(p2));
+      code = TSDB_CODE_PLAN_INTERNAL_ERROR;
+      goto _end;
+    }
+  } else if (num >= 3) {
+    // column_name_#1, column_name_#2...., analytics_options, timestamp_column_name, primary_key_column if exists
+    // column_name_#1, timestamp_column_name, primary_key_column if exists
+    // column_name_#1, analytics_options, timestamp_column_name
+    SNode* pTarget = nodesListGetNode(pFunc->pParameterList, 0);
+    if (nodeType(pTarget) != QUERY_NODE_COLUMN) {
+      code = TSDB_CODE_PLAN_INTERNAL_ERROR;
+      qError("%s first parameter is not valid column in forecast function", id);
+      goto _end;
     }
 
-    SNode* p2 = nodesListGetNode(pFunc->pParameterList, num - 2);
-    SNode* p3 = nodesListGetNode(pFunc->pParameterList, num - 1);
-
-    TSDB_CHECK_CONDITION(p2->type == QUERY_NODE_VALUE, code, lino, _end, TSDB_CODE_PLAN_INTERNAL_ERROR);
-    TSDB_CHECK_CONDITION(p3->type == QUERY_NODE_COLUMN, code, lino, _end, TSDB_CODE_PLAN_INTERNAL_ERROR);
+    SNode* pNode = nodesListGetNode(pFunc->pParameterList, num - 1);
+    if (nodeType(pNode) != QUERY_NODE_COLUMN) {
+      qError("%s last parameter is not valid column, actual:%d", id, nodeType(pNode));
+      code = TSDB_CODE_PLAN_INTERNAL_ERROR;
+    }
   }
 
 _end:
   if (code) {
-    qError("%s valid the parameters failed, line:%d, code:%s", id, lino, tstrerror(code));
+    qError("%s valid the parameters failed, code:%s", id, tstrerror(code));
   }
   return code;
 }
 
+static bool existInList(SForecastSupp* pSupp, int32_t slotId) {
+  for (int32_t j = 0; j < taosArrayGetSize(pSupp->pCovariateSlotList); ++j) {
+    SColumn* pCol = taosArrayGet(pSupp->pCovariateSlotList, j);
+
+    if (pCol->slotId == slotId) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 static int32_t forecastParseInput(SForecastSupp* pSupp, SNodeList* pFuncs, const char* id) {
   int32_t code = 0;
-  SNode* pNode = NULL;
+  SNode*  pNode = NULL;
+  
   pSupp->inputTsSlot = -1;
   pSupp->targetValSlot = -1;
   pSupp->targetValType = -1;
@@ -549,60 +578,104 @@ static int32_t forecastParseInput(SForecastSupp* pSupp, SNodeList* pFuncs, const
 
         if (numOfParam == 2) {
           // column, ts
-          SColumnNode* pValNode = (SColumnNode*)nodesListGetNode(pFunc->pParameterList, 0);
+          SColumnNode* pTarget = (SColumnNode*)nodesListGetNode(pFunc->pParameterList, 0);
           SColumnNode* pTsNode = (SColumnNode*)nodesListGetNode(pFunc->pParameterList, 1);
 
           pSupp->inputTsSlot = pTsNode->slotId;
           pSupp->inputPrecision = pTsNode->node.resType.precision;
-          pSupp->targetValSlot = pValNode->slotId;
-          pSupp->targetValType = pValNode->node.resType.type;
+          pSupp->targetValSlot = pTarget->slotId;
+          pSupp->targetValType = pTarget->node.resType.type;
 
           // let's add the holtwinters as the default forecast algorithm
-          tstrncpy(pSupp->algoOpt, "algo=holtwinters", TSDB_ANALYTIC_ALGO_OPTION_LEN);
-        } else if (numOfParam == 3) {
-          // column, options, ts
-          SColumnNode* pValNode = (SColumnNode*)nodesListGetNode(pFunc->pParameterList, 0);
-          SValueNode*  pOptNode = (SValueNode*)nodesListGetNode(pFunc->pParameterList, 1);
-          SColumnNode* pTsNode = (SColumnNode*)nodesListGetNode(pFunc->pParameterList, 2);
-
-          pSupp->inputTsSlot = pTsNode->slotId;
-          pSupp->inputPrecision = pTsNode->node.resType.precision;
-          pSupp->targetValSlot = pValNode->slotId;
-          pSupp->targetValType = pValNode->node.resType.type;
-          tstrncpy(pSupp->algoOpt, pOptNode->literal, sizeof(pSupp->algoOpt));
+          pSupp->pOptions = taosStrdup("algo=holtwinters");
+          if (pSupp->pOptions == NULL) {
+            qError("%s failed to dup forecast option, code:%s", id, tstrerror(terrno));
+            return terrno;
+          }
         } else {
-          SColumnNode* pValNode = (SColumnNode*)nodesListGetNode(pFunc->pParameterList, 0);
-          SValueNode*  pOptNode = (SValueNode*)nodesListGetNode(pFunc->pParameterList, numOfParam - 2);
-          SColumnNode* pTsNode = (SColumnNode*)nodesListGetNode(pFunc->pParameterList, numOfParam - 1);
+          SColumnNode* pTarget = (SColumnNode*)nodesListGetNode(pFunc->pParameterList, 0);
+          bool         assignTs = false;
+          bool         assignOpt = false;
 
-          pSupp->inputTsSlot = pTsNode->slotId;
-          pSupp->inputPrecision = pTsNode->node.resType.precision;
+          pSupp->targetValSlot = pTarget->slotId;
+          pSupp->targetValType = pTarget->node.resType.type;
 
-          pSupp->targetValSlot = pValNode->slotId;
-          pSupp->targetValType = pValNode->node.resType.type;
-          tstrncpy(pSupp->algoOpt, pOptNode->literal, sizeof(pSupp->algoOpt));
-
-          pSupp->pCovariateSlotList = taosArrayInit(4, sizeof(SColumn));
-          for(int32_t i = 1; i < numOfParam - 2; ++i) {
-            SColumnNode* p = (SColumnNode*)nodesListGetNode(pFunc->pParameterList, i);
-            SColumn col = {.slotId = p->slotId, .colType = p->colType, .type = p->node.resType.type};
-            taosArrayPush(pSupp->pCovariateSlotList, &col);
+          // set the primary ts column and option info
+          for (int32_t i = 0; i < numOfParam; ++i) {
+            SNode* pNode = nodesListGetNode(pFunc->pParameterList, i);
+            if (nodeType(pNode) == QUERY_NODE_COLUMN) {
+              SColumnNode* pColNode = (SColumnNode*)pNode;
+              if (pColNode->isPrimTs && (!assignTs)) {
+                pSupp->inputTsSlot = pColNode->slotId;
+                pSupp->inputPrecision = pColNode->node.resType.precision;
+                assignTs = true;
+                continue;
+              }
+            } else if (nodeType(pNode) == QUERY_NODE_VALUE) {
+              if (!assignOpt) {
+                SValueNode* pOptNode = (SValueNode*)pNode;
+                pSupp->pOptions = taosStrdup(pOptNode->literal);
+                assignOpt = true;
+                continue;
+              }
+            }
           }
 
-          pSupp->numOfInputCols += (numOfParam - 3);
+          if (!assignOpt) {
+            // set the default forecast option
+            pSupp->pOptions = taosStrdup("algo=holtwinters");
+            if (pSupp->pOptions == NULL) {
+              qError("%s failed to dup forecast option, code:%s", id, tstrerror(terrno));
+              return terrno;
+            }
+          }
+
+          pSupp->pCovariateSlotList = taosArrayInit(4, sizeof(SColumn));
+          pSupp->pDynamicRealList = taosArrayInit(4, sizeof(SColFutureData));
+
+          // the first is the target column
+          for (int32_t i = 1; i < numOfParam; ++i) {
+            SColumnNode* p = (SColumnNode*)nodesListGetNode(pFunc->pParameterList, i);
+            if ((nodeType(p) != QUERY_NODE_COLUMN) || (nodeType(p) == QUERY_NODE_COLUMN && p->isPrimTs)) {
+              break;
+            }
+
+            if (p->slotId == pSupp->targetValSlot) {
+              continue; // duplicate the target column, ignore it
+            }
+
+            bool exist = existInList(pSupp, p->slotId);
+            if (exist) {
+              continue;  // duplicate column, ignore it
+            }
+
+            SColumn col = {.slotId = p->slotId,
+                           .colType = p->colType,
+                           .type = p->node.resType.type,
+                           .bytes = p->node.resType.bytes};
+
+            tstrncpy(col.name, p->colName, tListLen(col.name));
+            void* pRet = taosArrayPush(pSupp->pCovariateSlotList, &col);
+            if (pRet == NULL) {
+              code = terrno;
+              qError("failed to record the covariate slot index, since %s", tstrerror(code));
+            }
+          }
+
+          pSupp->numOfInputCols += taosArrayGetSize(pSupp->pCovariateSlotList);
         }
       }
     }
   }
 
-  return 0;
+  return code;
 }
 
 static void initForecastOpt(SForecastSupp* pSupp) {
   pSupp->maxTs = 0;
   pSupp->minTs = INT64_MAX;
   pSupp->numOfRows = 0;
-  pSupp->wncheck = ANALY_FORECAST_DEFAULT_WNCHECK;
+  pSupp->wncheck = ANALY_DEFAULT_WNCHECK;
   pSupp->forecastRows = ANALY_FORECAST_DEFAULT_ROWS;
   pSupp->conf = ANALY_FORECAST_DEFAULT_CONF;
   pSupp->setEvery = 0;
@@ -631,12 +704,24 @@ static int32_t forecastParseOpt(SForecastSupp* pSupp, const char* id) {
 
   initForecastOpt(pSupp);
 
-  code = taosAnalyGetOpts(pSupp->algoOpt, &pHashMap);
+  code = taosAnalyGetOpts(pSupp->pOptions, &pHashMap);
   if (code != TSDB_CODE_SUCCESS) {
     return code;
   }
 
-  code = taosAnalysisParseAlgo(pSupp->algoOpt, pSupp->algoName, pSupp->algoUrl, ANALY_ALGO_TYPE_FORECAST,
+  if (taosHashGetSize(pHashMap) == 0) {
+    code = TSDB_CODE_INVALID_PARA;
+    qError("%s no valid options for forecast, failed to exec", id);
+    return code;
+  }
+
+  if (taosHashGetSize(pHashMap) == 0) {
+    code = TSDB_CODE_INVALID_PARA;
+    qError("%s no valid options for forecast, failed to exec", id);
+    return code;
+  }
+
+  code = taosAnalysisParseAlgo(pSupp->pOptions, pSupp->algoName, pSupp->algoUrl, ANALY_ALGO_TYPE_FORECAST,
                                tListLen(pSupp->algoUrl), pHashMap, id);
   TSDB_CHECK_CODE(code, lino, _end);
 
@@ -650,6 +735,7 @@ static int32_t forecastParseOpt(SForecastSupp* pSupp, const char* id) {
   pSupp->timeout = taosAnalysisParseTimout(pHashMap, id);
   pSupp->wncheck = taosAnalysisParseWncheck(pHashMap, id);
 
+  // extract the forecast rows
   char* pRows = taosHashGet(pHashMap, ALGO_OPT_FORECASTROWS_NAME, strlen(ALGO_OPT_FORECASTROWS_NAME));
   if (pRows != NULL) {
     int64_t v = 0;
@@ -658,7 +744,7 @@ static int32_t forecastParseOpt(SForecastSupp* pSupp, const char* id) {
     pSupp->forecastRows = v;
     qDebug("%s forecast rows:%"PRId64, id, pSupp->forecastRows);
   } else {
-    qDebug("%s forecast rows not found:%s, use default:%" PRId64, id, pSupp->algoOpt, pSupp->forecastRows);
+    qDebug("%s forecast rows not found:%s, use default:%" PRId64, id, pSupp->pOptions, pSupp->forecastRows);
   }
 
   if (pSupp->forecastRows > ANALY_FORECAST_RES_MAX_ROWS) {
@@ -668,9 +754,16 @@ static int32_t forecastParseOpt(SForecastSupp* pSupp, const char* id) {
     goto _end;
   }
 
+  if (pSupp->forecastRows <= 0) {
+    qError("%s output rows should be greater than 0, input:%" PRId64, id, pSupp->forecastRows);
+    code = TSDB_CODE_INVALID_PARA;
+    goto _end;
+  }
+
+  // extract the confidence interval value
   char* pConf = taosHashGet(pHashMap, ALGO_OPT_CONF_NAME, strlen(ALGO_OPT_CONF_NAME));
   if (pConf != NULL) {
-    char* endPtr = NULL;
+    char*  endPtr = NULL;
     double v = taosStr2Double(pConf, &endPtr);
     pSupp->conf = v;
 
@@ -682,9 +775,10 @@ static int32_t forecastParseOpt(SForecastSupp* pSupp, const char* id) {
       qDebug("%s forecast conf:%.2f", id, pSupp->conf);
     }
   } else {
-    qDebug("%s forecast conf not found:%s, use default:%.2f", id, pSupp->algoOpt, pSupp->conf);
+    qDebug("%s forecast conf not found:%s, use default:%.2f", id, pSupp->pOptions, pSupp->conf);
   }
 
+  // extract the start timestamp
   char* pStart = taosHashGet(pHashMap, ALGO_OPT_START_NAME, strlen(ALGO_OPT_START_NAME));
   if (pStart != NULL) {
     int64_t v = 0;
@@ -694,6 +788,7 @@ static int32_t forecastParseOpt(SForecastSupp* pSupp, const char* id) {
     qDebug("%s forecast set start ts:%"PRId64, id, pSupp->startTs);
   }
 
+  // extract the time step
   char* pEvery = taosHashGet(pHashMap, ALGO_OPT_EVERY_NAME, strlen(ALGO_OPT_EVERY_NAME));
   if (pEvery != NULL) {
     int64_t v = 0;
@@ -703,22 +798,200 @@ static int32_t forecastParseOpt(SForecastSupp* pSupp, const char* id) {
     qDebug("%s forecast set every ts:%"PRId64, id, pSupp->every);
   }
 
+  if (pSupp->setEvery && pSupp->every <= 0) {
+    qError("%s period should be greater than 0, user specified:%"PRId64, id, pSupp->every);
+    code = TSDB_CODE_INVALID_PARA;
+    goto _end;
+  }
+
+  // extract the dynamic real feature for covariate forecasting
+  void*       pIter = NULL;
+  size_t      keyLen = 0;
+  const char* p = "dynamic_real_";
+
+  while ((pIter = taosHashIterate(pHashMap, pIter))) {
+    const char* pVal = pIter;
+    char*       pKey = taosHashGetKey((void*)pVal, &keyLen);
+    int32_t     idx = 0;
+    char        nameBuf[512] = {0};
+
+    if (strncmp(pKey, p, strlen(p)) == 0) {
+
+      if (strncmp(&pKey[keyLen - 4], "_col", 4) == 0) {
+        continue;
+      }
+
+      int32_t ret = sscanf(pKey, "dynamic_real_%d", &idx);
+      if (ret == 0) {
+        continue;
+      }
+
+      memcpy(nameBuf, pKey, keyLen);
+      tstrncpy(&nameBuf[keyLen], "_col", tListLen(nameBuf) - keyLen);
+
+      void* pCol = taosHashGet(pHashMap, nameBuf, strlen(nameBuf));
+      if (pCol == NULL) {
+        char* pTmp = taosStrndupi(pKey, keyLen);
+        qError("%s dynamic real column related:%s column name:%s not specified", id, pTmp, nameBuf);
+        
+        taosMemoryFree(pTmp);
+        code = TSDB_CODE_INVALID_PARA;
+        goto _end;
+      } else {
+        // build dynamic_real_feature
+        SColFutureData d = {.pName = taosStrndupi(pCol, taosHashGetValueSize(pCol))};
+        if (d.pName == NULL) {
+          qError("%s failed to clone the future dynamic real column name:%s", id, (char*) pCol);
+          code = terrno;
+          goto _end;
+        }
+
+        int32_t index = -1;
+        for (int32_t i = 0; i < taosArrayGetSize(pSupp->pCovariateSlotList); ++i) {
+          SColumn* pColx = taosArrayGet(pSupp->pCovariateSlotList, i);
+          if (strcmp(pColx->name, d.pName) == 0) {
+            index = i;
+            break;
+          }
+        }
+
+        if (index == -1) {
+          qError("%s not found the required future dynamic real column:%s", id, d.pName);
+          code = TSDB_CODE_INVALID_PARA;
+          taosMemoryFree(d.pName);
+          goto _end;
+        }
+
+        SColumn* pColx = taosArrayGet(pSupp->pCovariateSlotList, index);
+        d.data.info.slotId = pColx->slotId;
+        d.data.info.type = pColx->type;
+        d.data.info.bytes = pColx->bytes;
+
+        int32_t len = taosHashGetValueSize((void*)pVal);
+        char*   buf = taosStrndupi(pVal, len);
+        int32_t unused = strdequote((char*)buf);
+
+        int32_t num = 0;
+        char**  pList = strsplit(buf, " ", &num);
+        if (num != pSupp->forecastRows) {
+          qError("%s the rows:%d of future dynamic real column data is not equalled to the forecasting rows:%" PRId64,
+                 id, num, pSupp->forecastRows);
+          code = TSDB_CODE_INVALID_PARA;
+
+          taosMemoryFree(d.pName);
+          taosMemoryFree(pList);
+          taosMemoryFree(buf);
+          goto _end;
+        }
+
+        d.numOfRows = num;
+
+        code = colInfoDataEnsureCapacity(&d.data, num, true);
+        if (code != 0) {
+          qError("%s failed to prepare buffer, code:%s", id, tstrerror(code));
+          goto _end;
+        }
+
+        for (int32_t j = 0; j < num; ++j) {
+          char* ps = NULL;
+          if (j == 0) {
+            ps = strstr(pList[j], "[") + 1;
+          } else {
+            ps = pList[j];
+          }
+
+          code = 0;
+
+          switch(pColx->type) {
+            case TSDB_DATA_TYPE_TINYINT: {
+              int8_t t1 = taosStr2Int8(ps, NULL, 10);
+              code = colDataSetVal(&d.data, j, (const char*)&t1, false);
+              break;
+            }
+            case TSDB_DATA_TYPE_SMALLINT: {
+              int16_t t1 = taosStr2Int16(ps, NULL, 10);
+              code = colDataSetVal(&d.data, j, (const char*)&t1, false);
+              break;
+            }
+            case TSDB_DATA_TYPE_INT: {
+              int32_t t1 = taosStr2Int32(ps, NULL, 10);
+              code = colDataSetVal(&d.data, j, (const char*)&t1, false);
+              break;
+            }
+            case TSDB_DATA_TYPE_BIGINT: {
+              int64_t t1 = taosStr2Int64(ps, NULL, 10);
+              code = colDataSetVal(&d.data, j, (const char*)&t1, false);
+              break;
+            }
+            case TSDB_DATA_TYPE_FLOAT: {
+              float t1 = taosStr2Float(ps, NULL);
+              code = colDataSetVal(&d.data, j, (const char*)&t1, false);
+              break;
+            }
+            case TSDB_DATA_TYPE_DOUBLE: {
+              double t1 = taosStr2Double(ps, NULL);
+              code = colDataSetVal(&d.data, j, (const char*)&t1, false);
+              break;
+            }
+            case TSDB_DATA_TYPE_UTINYINT: {
+              uint8_t t1 = taosStr2UInt8(ps, NULL, 10);
+              code = colDataSetVal(&d.data, j, (const char*)&t1, false);
+              break;
+            }
+            case TSDB_DATA_TYPE_USMALLINT: {
+              uint16_t t1 = taosStr2UInt16(ps, NULL, 10);
+              code = colDataSetVal(&d.data, j, (const char*)&t1, false);
+              break;
+            }
+            case TSDB_DATA_TYPE_UINT: {
+              uint32_t t1 = taosStr2UInt32(ps, NULL, 10);
+              code = colDataSetVal(&d.data, j, (const char*)&t1, false);
+              break;
+            }
+            case TSDB_DATA_TYPE_UBIGINT: {
+              uint64_t t1 = taosStr2UInt64(ps, NULL, 10);
+              code = colDataSetVal(&d.data, j, (const char*)&t1, false);
+              break;
+            }
+          }
+
+          if (code != 0) {
+            break;
+          }
+        }
+
+        taosMemoryFree(pList);
+        taosMemoryFree(buf);
+        if (code != 0) {
+          goto _end;
+        }
+
+        void* noret = taosArrayPush(pSupp->pDynamicRealList, &d);
+        if (noret == NULL) {
+          qError("%s failed to add column info in dynamic real column info", id);
+          code = terrno;
+          goto _end;
+        }
+      }
+    }
+  }
+
 _end:
   taosHashCleanup(pHashMap);
   return code;
 }
 
-static int32_t forecastCreateBuf(SForecastSupp* pSupp) {
+static int32_t forecastCreateBuf(SForecastSupp* pSupp, const char* pId) {
   SAnalyticBuf* pBuf = &pSupp->analyBuf;
-  int64_t       ts = 0;  // taosGetTimestampMs();
+  int64_t       ts = taosGetTimestampNs();
   int32_t       index = 0;
 
   pBuf->bufType = ANALYTICS_BUF_TYPE_JSON_COL;
-  snprintf(pBuf->fileName, sizeof(pBuf->fileName), "%s/tdengine-forecast-%" PRId64, tsTempDir, ts);
+  snprintf(pBuf->fileName, sizeof(pBuf->fileName), "%s/tdengine-forecast-%p-%" PRId64, tsTempDir, pSupp, ts);
 
   int32_t numOfCols = taosArrayGetSize(pSupp->pCovariateSlotList) + 2;
 
-  int32_t code = tsosAnalyBufOpen(pBuf, numOfCols);
+  int32_t code = tsosAnalyBufOpen(pBuf, numOfCols, pId);
   if (code != 0) goto _OVER;
 
   code = taosAnalyBufWriteColMeta(pBuf, index++, TSDB_DATA_TYPE_TIMESTAMP, "ts");
@@ -727,15 +1000,41 @@ static int32_t forecastCreateBuf(SForecastSupp* pSupp) {
   code = taosAnalyBufWriteColMeta(pBuf, index++, pSupp->targetValType, "val");
   if (code != 0) goto _OVER;
 
-  for(int32_t i = 0; i < taosArrayGetSize(pSupp->pCovariateSlotList); ++i) {
-    SColumn* pCol = taosArrayGet(pSupp->pCovariateSlotList, i);
+  int32_t numOfDynamicReal = taosArrayGetSize(pSupp->pDynamicRealList);
+  int32_t numOfPastDynamicReal = taosArrayGetSize(pSupp->pCovariateSlotList);
 
-    char name[128] = {0};
-    (void) tsnprintf(name, tListLen(name), "past_dynamic_real_%d", i + 1);
+  if (numOfPastDynamicReal >= numOfDynamicReal) {
+    for(int32_t i = 0; i < numOfDynamicReal; ++i) {
+      SColFutureData* pData = taosArrayGet(pSupp->pDynamicRealList, i);
 
-    code = taosAnalyBufWriteColMeta(pBuf, index++, pCol->type, name);
-    if (code) {
-      goto _OVER;
+      for(int32_t k = 0; k < taosArrayGetSize(pSupp->pCovariateSlotList); ++k) {
+        SColumn* pCol = taosArrayGet(pSupp->pCovariateSlotList, k);
+        if (strcmp(pCol->name, pData->pName) == 0) {
+          char name[128] = {0};
+          (void)snprintf(name, tListLen(name), "dynamic_real_%d", i + 1);
+          code = taosAnalyBufWriteColMeta(pBuf, index++, pCol->type, name);
+          if (code != 0) {
+            goto _OVER;
+          }
+
+          memcpy(&pData->col, pCol, sizeof(SColumn));
+          taosArrayRemove(pSupp->pCovariateSlotList, k);
+          break;
+        }
+      }
+    }
+
+    numOfPastDynamicReal = taosArrayGetSize(pSupp->pCovariateSlotList);
+    for (int32_t j = 0; j < numOfPastDynamicReal; ++j) {
+      SColumn* pCol = taosArrayGet(pSupp->pCovariateSlotList, j);
+
+      char name[128] = {0};
+      (void)snprintf(name, tListLen(name), "past_dynamic_real_%d", j + 1);
+
+      code = taosAnalyBufWriteColMeta(pBuf, index++, pCol->type, name);
+      if (code) {
+        goto _OVER;
+      }
     }
   }
 
@@ -755,6 +1054,63 @@ _OVER:
   return code;
 }
 
+static int32_t resetForecastOperState(SOperatorInfo* pOper) {
+  int32_t code = 0, lino = 0;
+  SForecastOperatorInfo* pInfo = pOper->info;
+  const char*            pId = pOper->pTaskInfo->id.str;
+  SForecastFuncPhysiNode* pForecastPhyNode = (SForecastFuncPhysiNode*)pOper->pPhyNode;
+  SExecTaskInfo* pTaskInfo = pOper->pTaskInfo;
+
+  pOper->status = OP_NOT_OPENED;
+
+  blockDataCleanup(pInfo->pRes);
+
+  taosArrayDestroy(pInfo->forecastSupp.pCovariateSlotList);
+  pInfo->forecastSupp.pCovariateSlotList = NULL;
+
+  taosAnalyBufDestroy(&pInfo->forecastSupp.analyBuf);
+
+  cleanupExprSupp(&pOper->exprSupp);
+  cleanupExprSupp(&pInfo->scalarSup);
+
+  int32_t                 numOfExprs = 0;
+  SExprInfo*              pExprInfo = NULL;
+
+  TAOS_CHECK_EXIT(createExprInfo(pForecastPhyNode->pFuncs, NULL, &pExprInfo, &numOfExprs));
+
+  TAOS_CHECK_EXIT(initExprSupp(&pOper->exprSupp, pExprInfo, numOfExprs, &pTaskInfo->storageAPI.functionStore));
+
+  TAOS_CHECK_EXIT(filterInitFromNode((SNode*)pForecastPhyNode->node.pConditions, &pOper->exprSupp.pFilterInfo, 0,
+                            pTaskInfo->pStreamRuntimeInfo));
+
+  TAOS_CHECK_EXIT(forecastParseInput(&pInfo->forecastSupp, pForecastPhyNode->pFuncs, pId));
+
+  TAOS_CHECK_EXIT(forecastParseOutput(&pInfo->forecastSupp, &pOper->exprSupp));
+
+  TAOS_CHECK_EXIT(forecastParseOpt(&pInfo->forecastSupp, pId));
+  TAOS_CHECK_EXIT(forecastCreateBuf(&pInfo->forecastSupp, pId));
+
+  if (pForecastPhyNode->pExprs != NULL) {
+    int32_t    num = 0;
+    SExprInfo* pScalarExprInfo = NULL;
+    TAOS_CHECK_EXIT(createExprInfo(pForecastPhyNode->pExprs, NULL, &pScalarExprInfo, &num));
+    TAOS_CHECK_EXIT(initExprSupp(&pInfo->scalarSup, pScalarExprInfo, num, &pTaskInfo->storageAPI.functionStore));
+  }
+
+  initResultSizeInfo(&pOper->resultInfo, 4096);
+
+_exit:
+
+  if (code) {
+    qError("%s failed at line %d since %s", __func__, lino, tstrerror(code));
+  }
+
+  return code;  
+}
+
+
+
+
 int32_t createForecastOperatorInfo(SOperatorInfo* downstream, SPhysiNode* pPhyNode, SExecTaskInfo* pTaskInfo,
                                    SOperatorInfo** pOptrInfo) {
   QRY_PARAM_CHECK(pOptrInfo);
@@ -767,6 +1123,8 @@ int32_t createForecastOperatorInfo(SOperatorInfo* downstream, SPhysiNode* pPhyNo
     code = terrno;
     goto _error;
   }
+  initOperatorCostInfo(pOperator);
+  pOperator->pPhyNode = pPhyNode;
 
   const char*             pId = pTaskInfo->id.str;
   SForecastSupp*          pSupp = &pInfo->forecastSupp;
@@ -791,7 +1149,8 @@ int32_t createForecastOperatorInfo(SOperatorInfo* downstream, SPhysiNode* pPhyNo
     QUERY_CHECK_CODE(code, lino, _error);
   }
 
-  code = filterInitFromNode((SNode*)pForecastPhyNode->node.pConditions, &pOperator->exprSupp.pFilterInfo, 0);
+  code = filterInitFromNode((SNode*)pForecastPhyNode->node.pConditions, &pOperator->exprSupp.pFilterInfo, 0,
+                            pTaskInfo->pStreamRuntimeInfo);
   QUERY_CHECK_CODE(code, lino, _error);
 
   code = forecastParseInput(pSupp, pForecastPhyNode->pFuncs, pId);
@@ -803,7 +1162,7 @@ int32_t createForecastOperatorInfo(SOperatorInfo* downstream, SPhysiNode* pPhyNo
   code = forecastParseOpt(pSupp, pId);
   QUERY_CHECK_CODE(code, lino, _error);
 
-  code = forecastCreateBuf(pSupp);
+  code = forecastCreateBuf(pSupp, pId);
   QUERY_CHECK_CODE(code, lino, _error);
 
   initResultSizeInfo(&pOperator->resultInfo, 4096);
@@ -816,6 +1175,8 @@ int32_t createForecastOperatorInfo(SOperatorInfo* downstream, SPhysiNode* pPhyNo
   pOperator->fpSet = createOperatorFpSet(optrDummyOpenFn, forecastNext, NULL, destroyForecastInfo, optrDefaultBufFn,
                                          NULL, optrDefaultGetNextExtFn, NULL);
 
+  setOperatorResetStateFn(pOperator, resetForecastOperState);
+
   code = blockDataEnsureCapacity(pInfo->pRes, pOperator->resultInfo.capacity);
   QUERY_CHECK_CODE(code, lino, _error);
 
@@ -824,7 +1185,7 @@ int32_t createForecastOperatorInfo(SOperatorInfo* downstream, SPhysiNode* pPhyNo
 
   *pOptrInfo = pOperator;
 
-  qDebug("%s forecast env is initialized, option:%s", pId, pSupp->algoOpt);
+  qDebug("%s forecast env is initialized, option:%s", pId, pSupp->pOptions);
   return TSDB_CODE_SUCCESS;
 
 _error:
@@ -837,6 +1198,12 @@ _error:
   return code;
 }
 
+static void destroyColFutureData(void* p) {
+  SColFutureData* pData = p;
+  taosMemoryFree(pData->pName);
+  colDataDestroy(&pData->data);
+}
+
 static void destroyForecastInfo(void* param) {
   SForecastOperatorInfo* pInfo = (SForecastOperatorInfo*)param;
 
@@ -845,6 +1212,11 @@ static void destroyForecastInfo(void* param) {
 
   taosArrayDestroy(pInfo->forecastSupp.pCovariateSlotList);
   pInfo->forecastSupp.pCovariateSlotList = NULL;
+
+  taosArrayDestroyEx(pInfo->forecastSupp.pDynamicRealList, destroyColFutureData);
+  pInfo->forecastSupp.pDynamicRealList = NULL;
+
+  taosMemoryFree(pInfo->forecastSupp.pOptions);
 
   cleanupExprSupp(&pInfo->scalarSup);
   taosAnalyBufDestroy(&pInfo->forecastSupp.analyBuf);

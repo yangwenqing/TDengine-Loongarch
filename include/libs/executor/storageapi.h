@@ -18,6 +18,7 @@
 
 #include "function.h"
 #include "index.h"
+#include "osMemory.h"
 #include "taosdef.h"
 #include "tcommon.h"
 #include "tmsg.h"
@@ -59,6 +60,8 @@ typedef struct SMetaEntry {
       SSchemaWrapper schemaTag;
       SRSmaParam     rsmaParam;
       int64_t        keep;
+      int64_t        ownerId;
+      int8_t         securityLevel;
     } stbEntry;
     struct {
       int64_t  btime;
@@ -74,6 +77,7 @@ typedef struct SMetaEntry {
       int32_t        commentLen;
       char*          comment;
       int32_t        ncid;  // next column id
+      int64_t        ownerId;
       SSchemaWrapper schemaRow;
     } ntbEntry;
     struct {
@@ -136,12 +140,14 @@ typedef struct SMetaTableInfo {
   int64_t         suid;
   int64_t         uid;
   SSchemaWrapper* schema;
+  SExtSchema*     pExtSchemas;
   char            tbName[TSDB_TABLE_NAME_LEN];
 } SMetaTableInfo;
 
 static FORCE_INLINE void destroyMetaTableInfo(SMetaTableInfo* mtInfo){
   if (mtInfo == NULL) return;
   tDeleteSchemaWrapper(mtInfo->schema);
+  taosMemoryFreeClear(mtInfo->pExtSchemas);
 }
 
 typedef struct SSnapContext {
@@ -187,20 +193,22 @@ struct SFileSetReader;
 typedef struct TsdReader {
   int32_t      (*tsdReaderOpen)(void* pVnode, SQueryTableDataCond* pCond, void* pTableList, int32_t numOfTables,
                            SSDataBlock* pResBlock, void** ppReader, const char* idstr, SHashObj** pIgnoreTables);
-  void         (*tsdReaderClose)();
-  int32_t      (*tsdSetReaderTaskId)(void *pReader, const char *pId);
-  int32_t      (*tsdSetQueryTableList)();
-  int32_t      (*tsdNextDataBlock)();
+  void         (*tsdReaderClose)(void* pReader);
+  int32_t      (*tsdSetReaderTaskId)(void* pReader, const char* pId);
+  int32_t      (*tsdSetQueryTableList)(void* p, const void* pTableList, int32_t num);
+  int32_t      (*tsdNextDataBlock)(void* pReader, bool* hasNext);
 
   int32_t      (*tsdReaderRetrieveBlockSMAInfo)();
-  int32_t      (*tsdReaderRetrieveDataBlock)();
+  int32_t      (*tsdReaderRetrieveDataBlock)(void* p, SSDataBlock** pBlock);
 
-  void         (*tsdReaderReleaseDataBlock)();
+  void         (*tsdReaderReleaseDataBlock)(void* pReader);
 
-  int32_t      (*tsdReaderResetStatus)();
+  int32_t      (*tsdReaderResetStatus)(void* p, SQueryTableDataCond* pCond);
   int32_t      (*tsdReaderGetDataBlockDistInfo)();
+  void         (*tsdReaderGetDatablock)();
+  void         (*tsdReaderSetDatablock)();
   int64_t      (*tsdReaderGetNumOfInMemRows)();
-  void         (*tsdReaderNotifyClosing)();
+  void         (*tsdReaderNotifyClosing)(void* pReader);
 
   void         (*tsdSetFilesetDelimited)(void* pReader);
   void         (*tsdSetSetNotifyCb)(void* pReader, TsdReaderNotifyCbFn notifyFn, void* param);
@@ -211,8 +219,14 @@ typedef struct TsdReader {
   int32_t (*fileSetGetEntryField)(struct SFileSetReader *, const char *, void *);
   void (*fileSetReaderClose)(struct SFileSetReader **);
 
-  int32_t (*getProgress)(const void* pReader, void** pBuf, uint64_t* pLen);
-  int32_t (*setProgress)(void *pReader, const void *pBuf, uint64_t len);
+  // retrieve first/last ts for each table
+  int32_t  (*tsdCreateFirstLastTsIter)(void *pVnode, STimeWindow *pWindow, SVersionRange *pVerRange, uint64_t suid, void *pTableList,
+                                   int32_t numOfTables, int32_t order, void **pIter, const char *idstr);
+  int32_t  (*tsdNextFirstLastTsBlock)(void *pIter, SSDataBlock *pRes, bool* hasNext);
+  void     (*tsdDestroyFirstLastTsIter)(void *pIter);
+
+  int32_t (*tsdReaderStepDone)(void *pReader, int64_t notifyTs);
+  void (*tsdReaderSetExecInfo)(const void *pReader, STableScanAnalyzeInfo* pExecInfo);
 } TsdReader;
 
 typedef struct SStoreCacheReader {
@@ -234,14 +248,9 @@ typedef struct SStoreTqReader {
   void (*tqReaderClose)();
 
   int32_t (*tqReaderSeek)();
-  int32_t (*tqRetrieveBlock)();
-  bool (*tqReaderNextBlockInWal)();
-  bool (*tqNextBlockImpl)();  // todo remove it
-  SSDataBlock* (*tqGetResultBlock)();
+  int32_t (*tqReaderNextBlockInWal)(struct STqReader *, SSDataBlock *, SHashObj *, SExprInfo *, int32_t,  int,  int32_t,  int64_t,  int8_t);
   int64_t (*tqGetResultBlockTime)();
-  int32_t (*tqGetStreamExecProgress)();
 
-  int32_t (*tqReaderSetColIdList)();
   int32_t (*tqReaderSetQueryTableList)();
 
   void (*tqReaderAddTables)();
@@ -256,9 +265,8 @@ typedef struct SStoreTqReader {
                                                  //  int32_t (*tqReaderRetrieveTaosXBlock)();       // todo remove it
 
   int32_t (*tqReaderSetSubmitMsg)();  // todo remove it
-  //  bool (*tqReaderNextBlockFilterOut)();
+  void (*tqUpdateTableTagCache)(struct STqReader *, SExprInfo *, int32_t,  int64_t,  col_id_t);
 
-  int32_t (*tqReaderSetVtableInfo)();
 } SStoreTqReader;
 
 typedef struct SStoreSnapshotFn {
@@ -295,6 +303,12 @@ typedef struct SStoreMeta {
                                 bool* acquireRes);
   int32_t (*putCachedTableList)(void* pVnode, uint64_t suid, const void* pKey, int32_t keyLen, void* pPayload,
                                 int32_t payloadLen, double selectivityRatio);
+  int32_t (*getStableCachedTableList)(void* pVnode, tb_uid_t suid,
+    const uint8_t* pTagCondKey, int32_t tagCondKeyLen,
+    const uint8_t* pKey, int32_t keyLen, SArray* pList1, bool* acquireRes);
+  int32_t (*putStableCachedTableList)(void* pVnode, uint64_t suid,
+    const void* pTagCondKey, int32_t tagCondKeyLen,
+    const void* pKey, int32_t keyLen, SArray* pUidList, SArray** pTagColIds);
 
   int32_t (*metaGetCachedRefDbs)(void* pVnode, tb_uid_t suid, SArray* pList);
   int32_t (*metaPutRefDbsToCache)(void* pVnode, tb_uid_t suid, SArray* pList);
@@ -304,10 +318,11 @@ typedef struct SStoreMeta {
   // support filter and non-filter cases. [vnodeGetCtbIdList & vnodeGetCtbIdListByFilter]
   int32_t (*getChildTableList)(void* pVnode, int64_t suid, SArray* list);
   int32_t (*storeGetTableList)(void* pVnode, int8_t type, SArray* pList);
-  int32_t (*getTableSchema)(void* pVnode, int64_t uid, STSchema** pSchema, int64_t* suid);
+  int32_t (*getTableSchema)(void* pVnode, int64_t uid, STSchema** pSchema, int64_t* suid, SSchemaWrapper** pTagSchema);
   int32_t (*getNumOfChildTables)(void* pVnode, int64_t uid, int64_t* numOfTables, int32_t* numOfCols, int8_t* flags);
   void (*getBasicInfo)(void* pVnode, const char** dbname, int32_t* vgId, int64_t* numOfTables,
                        int64_t* numOfNormalTables);
+  int8_t (*getSecurityLevel)(void* pVnode);
   int32_t (*getDBSize)(void* pVnode, SDbSizeStatisInfo* pInfo);
 
   SMCtbCursor* (*openCtbCursor)(void* pVnode, tb_uid_t uid, int lock);
@@ -322,7 +337,9 @@ typedef struct SStoreMetaReader {
   void (*clearReader)(SMetaReader* pReader);
   void (*readerReleaseLock)(SMetaReader* pReader);
   int32_t (*getTableEntryByUid)(SMetaReader* pReader, tb_uid_t uid);
+  int     (*getTableEntryByVersionUid)(SMetaReader *pReader, int64_t version, tb_uid_t uid);
   int32_t (*getTableEntryByName)(SMetaReader* pReader, const char* name);
+  int32_t (*getTableEntryByVersionName)(SMetaReader* pReader, int64_t version, const char* name);
   int32_t (*getEntryGetUidCache)(SMetaReader* pReader, tb_uid_t uid);
 } SStoreMetaReader;
 
@@ -345,14 +362,6 @@ typedef struct SUpdateInfo {
   int (*comparePkRowFn)(void* pValue1, void* pTs, void* pPkVal, __compar_fn_t cmpPkFn);
   __compar_fn_t comparePkCol;
 } SUpdateInfo;
-
-typedef struct SRecDataInfo {
-  STimeWindow calWin;
-  uint64_t    tableUid;
-  int64_t     dataVersion;
-  EStreamType mode;
-  char        pPkColData[];
-} SRecDataInfo;
 
 typedef struct SScanRange {
   STimeWindow win;
@@ -390,7 +399,6 @@ typedef struct STableTsDataState {
   int32_t          curRecId;
   void*            pStreamTaskState;
   SArray*          pScanRanges;
-  SRecDataInfo*    pRecValueBuff;
   int32_t          recValueLen;
   SStreamStateCur* pRecCur;
   int32_t          cfgIndex;
@@ -399,155 +407,6 @@ typedef struct STableTsDataState {
   void*            pBatchBuff;
 } STableTsDataState;
 
-typedef struct SStateStore {
-  int32_t (*streamStatePutParName)(SStreamState* pState, int64_t groupId, const char* tbname);
-  int32_t (*streamStateGetParName)(SStreamState* pState, int64_t groupId, void** pVal, bool onlyCache,
-                                   int32_t* pWinCode);
-  int32_t (*streamStateDeleteParName)(SStreamState* pState, int64_t groupId);
-  void (*streamStateSetParNameInvalid)(SStreamState* pState);
-
-  int32_t (*streamStateAddIfNotExist)(SStreamState* pState, const SWinKey* pKey, void** pVal, int32_t* pVLen,
-                                      int32_t* pWinCode);
-  void (*streamStateReleaseBuf)(SStreamState* pState, void* pVal, bool used);
-  void (*streamStateClearBuff)(SStreamState* pState, void* pVal);
-  void (*streamStateFreeVal)(void* val);
-  int32_t (*streamStateGetPrev)(SStreamState* pState, const SWinKey* pKey, SWinKey* pResKey, void** pVal,
-                                int32_t* pVLen, int32_t* pWinCode);
-  int32_t (*streamStateGetAllPrev)(SStreamState* pState, const SWinKey* pKey, SArray* pResArray, int32_t maxNum);
-
-  int32_t (*streamStatePut)(SStreamState* pState, const SWinKey* key, const void* value, int32_t vLen);
-  int32_t (*streamStateGet)(SStreamState* pState, const SWinKey* key, void** pVal, int32_t* pVLen, int32_t* pWinCode);
-  bool (*streamStateCheck)(SStreamState* pState, const SWinKey* key, bool hasLimit, bool* pIsLast);
-  bool (*streamStateCheckSessionState)(SStreamState* pState, SSessionKey* pKey, TSKEY gap, bool* pIsLast);
-  int32_t (*streamStateGetByPos)(SStreamState* pState, void* pos, void** pVal);
-  void (*streamStateDel)(SStreamState* pState, const SWinKey* key);
-  void (*streamStateDelByGroupId)(SStreamState* pState, uint64_t groupId);
-  void (*streamStateClear)(SStreamState* pState);
-  void (*streamStateSetNumber)(SStreamState* pState, int32_t number, int32_t tsIdex);
-  void (*streamStateSaveInfo)(SStreamState* pState, void* pKey, int32_t keyLen, void* pVal, int32_t vLen);
-  int32_t (*streamStateGetInfo)(SStreamState* pState, void* pKey, int32_t keyLen, void** pVal, int32_t* pLen);
-  int32_t (*streamStateGetNumber)(SStreamState* pState);
-  int32_t (*streamStateDeleteInfo)(SStreamState* pState, void* pKey, int32_t keyLen);
-
-  int32_t (*streamStateFillPut)(SStreamState* pState, const SWinKey* key, const void* value, int32_t vLen);
-  int32_t (*streamStateFillGet)(SStreamState* pState, const SWinKey* key, void** pVal, int32_t* pVLen,
-                                int32_t* pWinCode);
-  int32_t (*streamStateFillAddIfNotExist)(SStreamState* pState, const SWinKey* key, void** pVal, int32_t* pVLen,
-                                          int32_t* pWinCode);
-  void (*streamStateFillDel)(SStreamState* pState, const SWinKey* key);
-  int32_t (*streamStateFillGetNext)(SStreamState* pState, const SWinKey* pKey, SWinKey* pResKey, void** pVal,
-                                    int32_t* pVLen, int32_t* pWinCode);
-  int32_t (*streamStateFillGetPrev)(SStreamState* pState, const SWinKey* pKey, SWinKey* pResKey, void** pVal,
-                                    int32_t* pVLen, int32_t* pWinCode);
-
-  void (*streamStateCurNext)(SStreamState* pState, SStreamStateCur* pCur);
-  void (*streamStateCurPrev)(SStreamState* pState, SStreamStateCur* pCur);
-
-  SStreamStateCur* (*streamStateGetAndCheckCur)(SStreamState* pState, SWinKey* key);
-  SStreamStateCur* (*streamStateSeekKeyNext)(SStreamState* pState, const SWinKey* key);
-  SStreamStateCur* (*streamStateFillSeekKeyNext)(SStreamState* pState, const SWinKey* key);
-  SStreamStateCur* (*streamStateFillSeekKeyPrev)(SStreamState* pState, const SWinKey* key);
-  void (*streamStateFreeCur)(SStreamStateCur* pCur);
-
-  int32_t (*streamStateFillGetGroupKVByCur)(SStreamStateCur* pCur, SWinKey* pKey, const void** pVal, int32_t* pVLen);
-  int32_t (*streamStateGetKVByCur)(SStreamStateCur* pCur, SWinKey* pKey, const void** pVal, int32_t* pVLen);
-
-  void (*streamStateClearExpiredState)(SStreamState* pState, int32_t numOfKeep, TSKEY minTs);
-  void (*streamStateClearExpiredSessionState)(SStreamState* pState, int32_t numOfKeep, TSKEY minTs, SSHashObj* pFlushGroup);
-  int32_t (*streamStateSetRecFlag)(SStreamState* pState, const void* pKey, int32_t keyLen, int32_t mode);
-  int32_t (*streamStateGetRecFlag)(SStreamState* pState, const void* pKey, int32_t keyLen, int32_t* pMode);
-
-  int32_t (*streamStateSessionAddIfNotExist)(SStreamState* pState, SSessionKey* key, TSKEY gap, void** pVal,
-                                             int32_t* pVLen, int32_t* pWinCode);
-  int32_t (*streamStateSessionPut)(SStreamState* pState, const SSessionKey* key, void* value, int32_t vLen);
-  int32_t (*streamStateSessionGet)(SStreamState* pState, SSessionKey* key, void** pVal, int32_t* pVLen,
-                                   int32_t* pWinCode);
-  void (*streamStateSessionDel)(SStreamState* pState, const SSessionKey* key);
-  void (*streamStateSessionReset)(SStreamState* pState, void* pVal);
-  void (*streamStateSessionClear)(SStreamState* pState);
-  int32_t (*streamStateSessionGetKVByCur)(SStreamStateCur* pCur, SSessionKey* pKey, void** pVal, int32_t* pVLen);
-  int32_t (*streamStateStateAddIfNotExist)(SStreamState* pState, SSessionKey* key, char* pKeyData, int32_t keyDataLen,
-                                           state_key_cmpr_fn fn, void** pVal, int32_t* pVLen, int32_t* pWinCode);
-  int32_t (*streamStateSessionGetKeyByRange)(SStreamState* pState, const SSessionKey* range, SSessionKey* curKey);
-  int32_t (*streamStateCountGetKeyByRange)(SStreamState* pState, const SSessionKey* range, SSessionKey* curKey);
-  int32_t (*streamStateSessionAllocWinBuffByNextPosition)(SStreamState* pState, SStreamStateCur* pCur,
-                                                          const SSessionKey* pKey, void** pVal, int32_t* pVLen);
-  int32_t (*streamStateSessionSaveToDisk)(STableTsDataState* pTblState, SSessionKey* pKey, SRecDataInfo* pVal, int32_t vLen);
-  int32_t (*streamStateFlushReaminInfoToDisk)(STableTsDataState* pTblState);
-  int32_t (*streamStateSessionDeleteAll)(SStreamState* pState);
-
-  int32_t (*streamStateCountWinAddIfNotExist)(SStreamState* pState, SSessionKey* pKey, COUNT_TYPE winCount,
-                                              void** ppVal, int32_t* pVLen, int32_t* pWinCode);
-  int32_t (*streamStateCountWinAdd)(SStreamState* pState, SSessionKey* pKey, COUNT_TYPE winCount, void** pVal,
-                                    int32_t* pVLen);
-
-  int32_t (*updateInfoInit)(int64_t interval, int32_t precision, int64_t watermark, bool igUp, int8_t pkType,
-                            int32_t pkLen, SUpdateInfo** ppInfo);
-  int32_t (*updateInfoFillBlockData)(SUpdateInfo* pInfo, SSDataBlock* pBlock, int32_t primaryTsCol,
-                                     int32_t primaryKeyCol, TSKEY* pMaxResTs);
-  bool (*updateInfoIsUpdated)(SUpdateInfo* pInfo, uint64_t tableId, TSKEY ts, void* pPkVal, int32_t len);
-  bool (*updateInfoIsTableInserted)(SUpdateInfo* pInfo, int64_t tbUid);
-  bool (*isIncrementalTimeStamp)(SUpdateInfo* pInfo, uint64_t tableId, TSKEY ts, void* pPkVal, int32_t len);
-
-  void (*updateInfoDestroy)(SUpdateInfo* pInfo);
-  void (*windowSBfDelete)(SUpdateInfo* pInfo, uint64_t count);
-  int32_t (*windowSBfAdd)(SUpdateInfo* pInfo, uint64_t count);
-
-  int32_t (*updateInfoInitP)(SInterval* pInterval, int64_t watermark, bool igUp, int8_t pkType, int32_t pkLen,
-                             SUpdateInfo** ppInfo);
-  void (*updateInfoAddCloseWindowSBF)(SUpdateInfo* pInfo);
-  void (*updateInfoDestoryColseWinSBF)(SUpdateInfo* pInfo);
-  int32_t (*updateInfoSerialize)(SEncoder* pEncoder, const SUpdateInfo* pInfo);
-  int32_t (*updateInfoDeserialize)(SDecoder* pDeCoder, SUpdateInfo* pInfo);
-
-  SStreamStateCur* (*streamStateSessionSeekKeyPrev)(SStreamState* pState, const SSessionKey* key);
-  SStreamStateCur* (*streamStateSessionSeekKeyNext)(SStreamState* pState, const SSessionKey* key);
-  SStreamStateCur* (*streamStateCountSeekKeyPrev)(SStreamState* pState, const SSessionKey* pKey, COUNT_TYPE count);
-  SStreamStateCur* (*streamStateSessionSeekKeyCurrentPrev)(SStreamState* pState, const SSessionKey* key);
-  SStreamStateCur* (*streamStateSessionSeekKeyCurrentNext)(SStreamState* pState, const SSessionKey* key);
-
-  int32_t (*streamFileStateInit)(int64_t memSize, uint32_t keySize, uint32_t rowSize, uint32_t selectRowSize,
-                                 GetTsFun fp, void* pFile, TSKEY delMark, const char* id, int64_t ckId, int8_t type,
-                                 struct SStreamFileState** ppFileState);
-
-  int32_t (*streamStateGroupPut)(SStreamState* pState, int64_t groupId, void* value, int32_t vLen);
-  SStreamStateCur* (*streamStateGroupGetCur)(SStreamState* pState);
-  void (*streamStateGroupCurNext)(SStreamStateCur* pCur);
-  int32_t (*streamStateGroupGetKVByCur)(SStreamStateCur* pCur, int64_t* pKey, void** pVal, int32_t* pVLen);
-
-  void (*streamFileStateDestroy)(struct SStreamFileState* pFileState);
-  void (*streamFileStateClear)(struct SStreamFileState* pFileState);
-  bool (*needClearDiskBuff)(struct SStreamFileState* pFileState);
-
-  SStreamState* (*streamStateOpen)(const char* path, void* pTask, int64_t streamId, int32_t taskId);
-  SStreamState* (*streamStateRecalatedOpen)(const char* path, void* pTask, int64_t streamId, int32_t taskId);
-  void (*streamStateClose)(SStreamState* pState, bool remove);
-  int32_t (*streamStateBegin)(SStreamState* pState);
-  void (*streamStateCommit)(SStreamState* pState);
-  void (*streamStateDestroy)(SStreamState* pState, bool remove);
-  void (*streamStateReloadInfo)(SStreamState* pState, TSKEY ts);
-  void (*streamStateCopyBackend)(SStreamState* src, SStreamState* dst);
-
-  int32_t (*streamStateGetAndSetTsData)(STableTsDataState* pState, uint64_t tableUid, TSKEY* pCurTs, void** ppCurPkVal,
-                                        TSKEY lastTs, void* pLastPkVal, int32_t lastPkLen, int32_t* pWinCode);
-  int32_t (*streamStateTsDataCommit)(STableTsDataState* pState);
-  int32_t (*streamStateInitTsDataState)(STableTsDataState** ppTsDataState, int8_t pkType, int32_t pkLen, void* pState, void* pOtherState);
-  void (*streamStateDestroyTsDataState)(STableTsDataState* pTsDataState);
-  int32_t (*streamStateRecoverTsData)(STableTsDataState* pTsDataState);
-  int32_t (*streamStateReloadTsDataState)(STableTsDataState* pTsDataState);
-  int32_t (*streamStateMergeAndSaveScanRange)(STableTsDataState* pTsDataState, STimeWindow* pWin, uint64_t gpId,
-                                              SRecDataInfo* pRecData, int32_t len);
-  int32_t (*streamStateMergeAllScanRange)(STableTsDataState* pTsDataState);
-  int32_t (*streamStatePopScanRange)(STableTsDataState* pTsDataState, SScanRange* pRange);
-
-  SStreamStateCur* (*streamStateGetLastStateCur)(SStreamState* pState);
-  void (*streamStateLastStateCurNext)(SStreamStateCur* pCur);
-  int32_t (*streamStateNLastStateGetKVByCur)(SStreamStateCur* pCur, int32_t num, SArray* pRes);
-  SStreamStateCur* (*streamStateGetLastSessionStateCur)(SStreamState* pState);
-  void (*streamStateLastSessionStateCurNext)(SStreamStateCur* pCur);
-  int32_t (*streamStateNLastSessionStateGetKVByCur)(SStreamStateCur* pCur, int32_t num, SArray* pRes);
-} SStateStore;
-
 typedef struct SStorageAPI {
   SStoreMeta          metaFn;  // todo: refactor
   TsdReader           tsdReader;
@@ -555,7 +414,6 @@ typedef struct SStorageAPI {
   SStoreCacheReader   cacheFn;
   SStoreSnapshotFn    snapshotFn;
   SStoreTqReader      tqReaderFn;
-  SStateStore         stateStore;
   SMetaDataFilterAPI  metaFilter;
   SFunctionStateStore functionStore;
 } SStorageAPI;

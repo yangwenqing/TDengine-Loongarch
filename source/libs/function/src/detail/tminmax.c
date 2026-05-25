@@ -24,7 +24,7 @@
 #define __COMPARE_ACQUIRED_MAX(i, end, bm, _data, ctx, val, pos) \
   int32_t code = TSDB_CODE_SUCCESS;                              \
   for (; i < (end); ++i) {                                       \
-    if (colDataIsNull_f(bm, i)) {                                \
+    if (BMIsNull(bm, i)) {                                \
       continue;                                                  \
     }                                                            \
                                                                  \
@@ -42,7 +42,7 @@
 #define __COMPARE_ACQUIRED_MIN(i, end, bm, _data, ctx, val, pos) \
   int32_t code = TSDB_CODE_SUCCESS;                              \
   for (; i < (end); ++i) {                                       \
-    if (colDataIsNull_f(bm, i)) {                                \
+    if (BMIsNull(bm, i)) {                                \
       continue;                                                  \
     }                                                            \
                                                                  \
@@ -76,7 +76,7 @@
 static int32_t findFirstValPosition(const SColumnInfoData* pCol, int32_t start, int32_t numOfRows, bool isStr) {
   int32_t i = start;
 
-  while (i < (start + numOfRows) && (isStr ? colDataIsNull_s(pCol, i) : colDataIsNull_f(pCol->nullbitmap, i) == true)) {
+  while (i < (start + numOfRows) && (isStr ? colDataIsNull_s(pCol, i) : colDataIsNull_f(pCol, i) == true)) {
     i += 1;
   }
 
@@ -309,7 +309,8 @@ static int32_t doExtractVal(SColumnInfoData* pCol, int32_t i, int32_t end, SqlFu
         break;
       }
 
-      case TSDB_DATA_TYPE_BIGINT: {
+      case TSDB_DATA_TYPE_BIGINT:
+      case TSDB_DATA_TYPE_TIMESTAMP: {
         const int64_t* pData = (const int64_t*)pCol->pData;
         __COMPARE_ACQUIRED_MIN(i, end, pCol->nullbitmap, pData, pCtx, (pBuf->v), &pBuf->tuplePos)
         break;
@@ -401,7 +402,7 @@ static int32_t doExtractVal(SColumnInfoData* pCol, int32_t i, int32_t end, SqlFu
         const SDecimalOps* pOps = getDecimalOps(TSDB_DATA_TYPE_DECIMAL64);
         int32_t            code = 0;
         for (; i < end; ++i) {
-          if (colDataIsNull_f(pCol->nullbitmap, i)) {
+          if (colDataIsNull_f(pCol, i)) {
             continue;
           }
           if (pOps->gt(&pBuf->v, &pData[i], DECIMAL_WORD_NUM(Decimal64))) {
@@ -418,7 +419,7 @@ static int32_t doExtractVal(SColumnInfoData* pCol, int32_t i, int32_t end, SqlFu
         const SDecimalOps* pOps = getDecimalOps(TSDB_DATA_TYPE_DECIMAL);
         const Decimal128*  pData = (const Decimal128*)pCol->pData;
         for (; i < end; ++i) {
-          if (colDataIsNull_f(pCol->nullbitmap, i)) {
+          if (colDataIsNull_f(pCol, i)) {
             continue;
           }
           if (pOps->gt(pBuf->dec, &pData[i], DECIMAL_WORD_NUM(Decimal128))) {
@@ -452,7 +453,8 @@ static int32_t doExtractVal(SColumnInfoData* pCol, int32_t i, int32_t end, SqlFu
         break;
       }
 
-      case TSDB_DATA_TYPE_BIGINT: {
+      case TSDB_DATA_TYPE_BIGINT: 
+      case TSDB_DATA_TYPE_TIMESTAMP: {
         const int64_t* pData = (const int64_t*)pCol->pData;
         __COMPARE_ACQUIRED_MAX(i, end, pCol->nullbitmap, pData, pCtx, (pBuf->v), &pBuf->tuplePos)
         break;
@@ -498,7 +500,7 @@ static int32_t doExtractVal(SColumnInfoData* pCol, int32_t i, int32_t end, SqlFu
         const SDecimalOps* pOps = getDecimalOps(TSDB_DATA_TYPE_DECIMAL64);
         int32_t code = 0;
         for (; i < end; ++i) {
-          if (colDataIsNull_f(pCol->nullbitmap, i)) {
+          if (colDataIsNull_f(pCol, i)) {
             continue;
           }
           if (pOps->lt(&pBuf->v, &pData[i], DECIMAL_WORD_NUM(Decimal64))) {
@@ -515,7 +517,7 @@ static int32_t doExtractVal(SColumnInfoData* pCol, int32_t i, int32_t end, SqlFu
         const SDecimalOps* pOps = getDecimalOps(TSDB_DATA_TYPE_DECIMAL);
         const Decimal128*  pData = (const Decimal128*)pCol->pData;
         for (; i < end; ++i) {
-          if (colDataIsNull_f(pCol->nullbitmap, i)) {
+          if (colDataIsNull_f(pCol, i)) {
             continue;
           }
           if (pOps->lt(pBuf->dec, &pData[i], DECIMAL_WORD_NUM(Decimal128))) {
@@ -636,7 +638,7 @@ int32_t doMinMaxHelper(SqlFunctionCtx* pCtx, int32_t isMinFunc, int32_t* nElems)
 
       code = saveRelatedTupleTag(pCtx, pInput, tval);
     } else {
-      if (IS_SIGNED_NUMERIC_TYPE(type)) {
+      if (IS_SIGNED_NUMERIC_TYPE(type) || TSDB_DATA_TYPE_BOOL == type || TSDB_DATA_TYPE_TIMESTAMP == type) {
         int64_t prev = 0;
         GET_TYPED_DATA(prev, int64_t, type, &pBuf->v, 0);
 
@@ -699,7 +701,7 @@ int32_t doMinMaxHelper(SqlFunctionCtx* pCtx, int32_t isMinFunc, int32_t* nElems)
   // clang-format off
   int32_t threshold[] = {
       //NULL,    BOOL,      TINYINT, SMALLINT, INT, BIGINT, FLOAT, DOUBLE, VARCHAR,   TIMESTAMP, NCHAR,
-      INT32_MAX, INT32_MAX, 32,      16,       8,   4,      8,     4,      INT32_MAX, INT32_MAX, INT32_MAX,
+      INT32_MAX, 32,        32,      16,       8,   4,      8,     4,      INT32_MAX, 4,         INT32_MAX,
       // UTINYINT,USMALLINT, UINT, UBIGINT,   JSON,      VARBINARY, DECIMAL,   BLOB,      MEDIUMBLOB, BINARY,   Decimal64
       32,         16,        8,    4,         INT32_MAX, INT32_MAX, INT32_MAX, INT32_MAX, INT32_MAX,  INT32_MAX, INT32_MAX,
   };
@@ -715,6 +717,7 @@ int32_t doMinMaxHelper(SqlFunctionCtx* pCtx, int32_t isMinFunc, int32_t* nElems)
         case TSDB_DATA_TYPE_DOUBLE:
         case TSDB_DATA_TYPE_UBIGINT:
         case TSDB_DATA_TYPE_BIGINT:
+        case TSDB_DATA_TYPE_TIMESTAMP:
           pBuf->v = *(int64_t*)p;
           break;
         case TSDB_DATA_TYPE_UINT:
@@ -787,7 +790,8 @@ int32_t doMinMaxHelper(SqlFunctionCtx* pCtx, int32_t isMinFunc, int32_t* nElems)
         handleInt32Col(pCol->pData, start, numOfRows, pBuf, isMinFunc, true);
         break;
       }
-      case TSDB_DATA_TYPE_BIGINT: {
+      case TSDB_DATA_TYPE_BIGINT:
+      case TSDB_DATA_TYPE_TIMESTAMP: {
         handleInt64Col(pCol->pData, start, numOfRows, pBuf, isMinFunc, true);
         break;
       }

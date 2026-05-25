@@ -51,12 +51,13 @@
 // use 256 as normal buffer length
 #define BUFFER_LEN                 256
 
+#define MAX_LINE_LENGTH            1024
 #define VALUE_BUF_LEN              4096
 #define MAX_RECORDS_PER_REQ        32766
 #define NEED_CALC_COUNT            UINT64_MAX
-#define HUMAN_TIME_LEN             28
+#define HUMAN_TIME_LEN             60
 #define DUMP_DIR_LEN               (MAX_DIR_LEN - (TSDB_DB_NAME_LEN + 10))
-#define TSDB_USET_PASSWORD_LONGLEN 256  // come from tdef.h
+#define TSDB_USER_PASSWORD_LONGLEN 256  // come from tdef.h
 #define ITEM_SPACE                 50
 #define NTABLE_FOLDER              "data0-0"
 
@@ -202,6 +203,7 @@ typedef struct {
 
 typedef struct {
     char name[TSDB_TABLE_NAME_LEN+1];
+    bool isVirtual;
     int columns;
     int tags;
     ColDes cols[];
@@ -304,7 +306,7 @@ typedef struct HashMap {
 typedef struct StbChange {
     // main
     TableDes *tableDes;
-    
+
     // bellow create by tableDes
     char *strTags;
     char *strCols;
@@ -389,13 +391,13 @@ typedef struct RecordSchema_S {
     int  num_fields;
 
     // read stb_schema_for_db
-    char stbName[TSDB_TABLE_NAME_LEN]; 
-    TableDes *tableDes;    
+    char stbName[TSDB_TABLE_NAME_LEN];
+    TableDes *tableDes;
 } RecordSchema;
 
 /* avro section end */
 
-// rename db 
+// rename db
 typedef struct SRenameDB {
     char* old;
     char* new;
@@ -407,7 +409,7 @@ typedef struct arguments {
     // connection option
     char    *host;
     char    *user;
-    char     password[TSDB_USET_PASSWORD_LONGLEN];
+    char     password[TSDB_USER_PASSWORD_LONGLEN];
     uint16_t port;
     // strlen(taosdump.) +1 is 10
     char     outpath[DUMP_DIR_LEN];
@@ -458,8 +460,8 @@ typedef struct arguments {
     SRenameDB * renameHead;
     // retry for call engine api
     int32_t     retryCount;
-    int32_t     retrySleepMs;  
-        
+    int32_t     retrySleepMs;
+
 } SArguments;
 
 bool isSystemDatabase(char *dbName);
@@ -477,8 +479,8 @@ int processFieldsValueV3(
 
 void constructTableDesFromStb(const TableDes *stbTableDes,
         const char *table,
-        TableDes **ppTableDes);  
-int typeStrToType(const char *type_str);      
+        TableDes **ppTableDes);
+int typeStrToType(const char *type_str);
 int64_t queryDbForDumpOutCount(
         void **taos_v,
         const char *dbName,
@@ -497,9 +499,7 @@ void *queryDbForDumpOutOffset(
         const char *tbName,
         const int precision,
         const int64_t start_time,
-        const int64_t end_time,
-        const int64_t limit,
-        const int64_t offset);
+        const int64_t end_time);
 int processValueToAvro(
         const int32_t col,
         avro_value_t record,
@@ -512,7 +512,7 @@ int processValueToAvro(
         const int32_t len
         );
 void printDotOrX(int64_t count, bool *printDot);
-void freeRecordSchema(RecordSchema *recordSchema);  
+void freeRecordSchema(RecordSchema *recordSchema);
 int processResultValue(
         char *pstr,
         const int curr_sqlstr_len,

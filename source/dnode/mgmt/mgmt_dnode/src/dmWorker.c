@@ -17,30 +17,29 @@
 #include "dmInt.h"
 #include "tgrant.h"
 #include "thttp.h"
+#include "streamMsg.h"
+#if defined(TD_ENTERPRISE) && defined(TD_HAS_TAOSK)
+#include "taoskInt.h"
+#endif
+
+// Encryption key expiration constants
+#define MILLISECONDS_PER_DAY (24 * 3600 * 1000)
 
 static void *dmStatusThreadFp(void *param) {
   SDnodeMgmt *pMgmt = param;
   int64_t     lastTime = taosGetTimestampMs();
   setThreadName("dnode-status");
 
-  int32_t upTimeCount = 0;
-  int64_t upTime = 0;
-
   while (1) {
-    taosMsleep(200);
+    taosMsleep(50);
     if (pMgmt->pData->dropped || pMgmt->pData->stopped) break;
 
     int64_t curTime = taosGetTimestampMs();
     if (curTime < lastTime) lastTime = curTime;
-    float interval = (curTime - lastTime) / 1000.0f;
-    if (interval >= tsStatusInterval) {
+    float interval = curTime - lastTime;
+    if (interval >= tsStatusIntervalMs) {
       dmSendStatusReq(pMgmt);
       lastTime = curTime;
-
-      if ((upTimeCount = ((upTimeCount + 1) & 63)) == 0) {
-        upTime = taosGetOsUptime() - tsDndStartOsUptime;
-        tsDndUpTime = TMAX(tsDndUpTime, upTime);
-      }
     }
   }
 
@@ -52,14 +51,115 @@ static void *dmConfigThreadFp(void *param) {
   int64_t     lastTime = taosGetTimestampMs();
   setThreadName("dnode-config");
   while (1) {
-    taosMsleep(200);
+    taosMsleep(50);
     if (pMgmt->pData->dropped || pMgmt->pData->stopped || tsConfigInited) break;
 
     int64_t curTime = taosGetTimestampMs();
     if (curTime < lastTime) lastTime = curTime;
-    float interval = (curTime - lastTime) / 1000.0f;
-    if (interval >= tsStatusInterval) {
+    float interval = curTime - lastTime;
+    if (interval >= tsStatusIntervalMs) {
       dmSendConfigReq(pMgmt);
+      lastTime = curTime;
+    }
+  }
+  return NULL;
+}
+
+static void *dmKeySyncThreadFp(void *param) {
+  SDnodeMgmt *pMgmt = param;
+  int64_t     lastTime = taosGetTimestampMs();
+  setThreadName("dnode-keysync");
+
+  // Wait a bit before first sync attempt
+  taosMsleep(3000);
+
+  while (1) {
+    taosMsleep(100);
+    if (pMgmt->pData->dropped || pMgmt->pData->stopped) break;
+
+    int64_t curTime = taosGetTimestampMs();
+    if (curTime < lastTime) lastTime = curTime;
+    float interval = curTime - lastTime;
+    if (interval >= tsStatusIntervalMs) {
+      // Sync keys periodically (every 30 seconds) or on first run
+      if (tsEncryptKeysStatus == TSDB_ENCRYPT_KEY_STAT_LOADED) {
+        // Check if encryption keys are expired based on configured threshold
+        int64_t keyExpirationThreshold = (int64_t)tsKeyExpirationDays * MILLISECONDS_PER_DAY;
+        int64_t svrKeyAge = curTime - tsSvrKeyUpdateTime;
+        int64_t dbKeyAge = curTime - tsDbKeyUpdateTime;
+
+        if (svrKeyAge > keyExpirationThreshold || dbKeyAge > keyExpirationThreshold) {
+          const char *action = (strcmp(tsKeyExpirationStrategy, "ALARM") == 0) ? "warning" : "attempting reload";
+          dWarn("encryption keys may be expired (threshold:%d days, strategy:%s), svrKeyAge:%" PRId64
+                " days, dbKeyAge:%" PRId64 " days, %s",
+                tsKeyExpirationDays, tsKeyExpirationStrategy, svrKeyAge / MILLISECONDS_PER_DAY,
+                dbKeyAge / MILLISECONDS_PER_DAY, action);
+#if defined(TD_ENTERPRISE) && defined(TD_HAS_TAOSK)
+          // Try to reload keys from file
+          char masterKeyFile[PATH_MAX] = {0};
+          char derivedKeyFile[PATH_MAX] = {0};
+          snprintf(masterKeyFile, sizeof(masterKeyFile), "%s%sdnode%sconfig%smaster.bin", tsDataDir, TD_DIRSEP,
+                   TD_DIRSEP, TD_DIRSEP);
+          snprintf(derivedKeyFile, sizeof(derivedKeyFile), "%s%sdnode%sconfig%sderived.bin", tsDataDir, TD_DIRSEP,
+                   TD_DIRSEP, TD_DIRSEP);
+
+          char    svrKey[ENCRYPT_KEY_LEN + 1] = {0};
+          char    dbKey[ENCRYPT_KEY_LEN + 1] = {0};
+          char    cfgKey[ENCRYPT_KEY_LEN + 1] = {0};
+          char    metaKey[ENCRYPT_KEY_LEN + 1] = {0};
+          char    dataKey[ENCRYPT_KEY_LEN + 1] = {0};
+          int32_t algorithm = 0;
+          int32_t cfgAlgorithm = 0;
+          int32_t metaAlgorithm = 0;
+          int32_t fileVersion = 0;
+          int32_t keyVersion = 0;
+          int64_t createTime = 0;
+          int64_t svrKeyUpdateTime = 0;
+          int64_t dbKeyUpdateTime = 0;
+
+          int32_t code =
+              taoskLoadEncryptKeys(masterKeyFile, derivedKeyFile, svrKey, dbKey, cfgKey, metaKey, dataKey, &algorithm,
+                                   &cfgAlgorithm, &metaAlgorithm, &fileVersion, &keyVersion, &createTime, 
+                                   &svrKeyUpdateTime, &dbKeyUpdateTime);
+          if (code == 0) {
+            // Update global variables with reloaded keys
+            tstrncpy(tsSvrKey, svrKey, sizeof(tsSvrKey));
+            tstrncpy(tsDbKey, dbKey, sizeof(tsDbKey));
+            tstrncpy(tsCfgKey, cfgKey, sizeof(tsCfgKey));
+            tstrncpy(tsMetaKey, metaKey, sizeof(tsMetaKey));
+            tstrncpy(tsDataKey, dataKey, sizeof(tsDataKey));
+            tsEncryptAlgorithmType = algorithm;
+            tsCfgAlgorithm = cfgAlgorithm;
+            tsMetaAlgorithm = metaAlgorithm;
+            tsEncryptFileVersion = fileVersion;
+            tsEncryptKeyVersion = keyVersion;
+            tsEncryptKeyCreateTime = createTime;
+            tsSvrKeyUpdateTime = svrKeyUpdateTime;
+            tsDbKeyUpdateTime = dbKeyUpdateTime;
+
+            // Check if keys are still expired after reload
+            svrKeyAge = curTime - tsSvrKeyUpdateTime;
+            dbKeyAge = curTime - tsDbKeyUpdateTime;
+            if (svrKeyAge > keyExpirationThreshold || dbKeyAge > keyExpirationThreshold) {
+              dError("encryption keys are still expired after reload (threshold:%d days), svrKeyAge:%" PRId64
+                     " days, dbKeyAge:%" PRId64 " days, please rotate keys",
+                     tsKeyExpirationDays, svrKeyAge / MILLISECONDS_PER_DAY, dbKeyAge / MILLISECONDS_PER_DAY);
+            } else {
+              dInfo("successfully reloaded encryption keys, svrKeyAge:%" PRId64 " days, dbKeyAge:%" PRId64
+                    " days (threshold:%d days)",
+                    svrKeyAge / MILLISECONDS_PER_DAY, dbKeyAge / MILLISECONDS_PER_DAY, tsKeyExpirationDays);
+            }
+          } else {
+            dError("failed to reload encryption keys since %s", tstrerror(code));
+          }
+#endif
+        }
+      } else if (tsEncryptKeysStatus == TSDB_ENCRYPT_KEY_STAT_DISABLED) {
+        dInfo("encryption keys are disabled, stopping key sync thread");
+        break;
+      } else {
+        dmSendKeySyncReq(pMgmt);
+      }
       lastTime = curTime;
     }
   }
@@ -75,19 +175,19 @@ static void *dmStatusInfoThreadFp(void *param) {
   int64_t upTime = 0;
 
   while (1) {
-    taosMsleep(200);
+    taosMsleep(50);
     if (pMgmt->pData->dropped || pMgmt->pData->stopped) break;
 
     int64_t curTime = taosGetTimestampMs();
     if (curTime < lastTime) lastTime = curTime;
-    float interval = (curTime - lastTime) / 1000.0f;
-    if (interval >= tsStatusInterval) {
+    float interval = curTime - lastTime;
+    if (interval >= tsStatusIntervalMs) {
       dmUpdateStatusInfo(pMgmt);
       lastTime = curTime;
 
       if ((upTimeCount = ((upTimeCount + 1) & 63)) == 0) {
         upTime = taosGetOsUptime() - tsDndStartOsUptime;
-        tsDndUpTime = TMAX(tsDndUpTime, upTime);
+        if (upTime > 0) tsDndUpTime = upTime;
       }
     }
   }
@@ -292,7 +392,7 @@ static void *dmCrashReportThreadFp(void *param) {
     }
     if (loopTimes++ < reportPeriodNum) {
       taosMsleep(sleepTime);
-      if(loopTimes < 0) loopTimes = reportPeriodNum;
+      if (loopTimes < 0) loopTimes = reportPeriodNum;
       continue;
     }
     taosReadCrashInfo(filepath, &pMsg, &msgLen, &pFile);
@@ -337,6 +437,26 @@ static void *dmCrashReportThreadFp(void *param) {
 }
 #endif
 
+static void *dmMetricsThreadFp(void *param) {
+  SDnodeMgmt *pMgmt = param;
+  int64_t     lastTime = taosGetTimestampMs();
+  setThreadName("dnode-metrics");
+  while (1) {
+    taosMsleep(200);
+    if (pMgmt->pData->dropped || pMgmt->pData->stopped) break;
+
+    int64_t curTime = taosGetTimestampMs();
+    if (curTime < lastTime) lastTime = curTime;
+    float interval = (curTime - lastTime) / 1000.0f;
+    if (interval >= tsMetricsInterval) {
+      (*pMgmt->sendMetricsReportFp)();
+      (*pMgmt->metricsCleanExpiredSamplesFp)();
+      lastTime = curTime;
+    }
+  }
+  return NULL;
+}
+
 int32_t dmStartStatusThread(SDnodeMgmt *pMgmt) {
   int32_t      code = 0;
   TdThreadAttr thAttr;
@@ -375,6 +495,25 @@ int32_t dmStartConfigThread(SDnodeMgmt *pMgmt) {
   return 0;
 }
 
+int32_t dmStartKeySyncThread(SDnodeMgmt *pMgmt) {
+  int32_t      code = 0;
+  TdThreadAttr thAttr;
+  (void)taosThreadAttrInit(&thAttr);
+  (void)taosThreadAttrSetDetachState(&thAttr, PTHREAD_CREATE_JOINABLE);
+#ifdef TD_COMPACT_OS
+  (void)taosThreadAttrSetStackSize(&thAttr, STACK_SIZE_SMALL);
+#endif
+  if (taosThreadCreate(&pMgmt->keySyncThread, &thAttr, dmKeySyncThreadFp, pMgmt) != 0) {
+    code = TAOS_SYSTEM_ERROR(ERRNO);
+    dError("failed to create key sync thread since %s", tstrerror(code));
+    return code;
+  }
+
+  (void)taosThreadAttrDestroy(&thAttr);
+  tmsgReportStartup("dnode-keysync", "initialized");
+  return 0;
+}
+
 int32_t dmStartStatusInfoThread(SDnodeMgmt *pMgmt) {
   int32_t      code = 0;
   TdThreadAttr thAttr;
@@ -405,6 +544,13 @@ void dmStopConfigThread(SDnodeMgmt *pMgmt) {
   if (taosCheckPthreadValid(pMgmt->configThread)) {
     (void)taosThreadJoin(pMgmt->configThread, NULL);
     taosThreadClear(&pMgmt->configThread);
+  }
+}
+
+void dmStopKeySyncThread(SDnodeMgmt *pMgmt) {
+  if (taosCheckPthreadValid(pMgmt->keySyncThread)) {
+    (void)taosThreadJoin(pMgmt->keySyncThread, NULL);
+    taosThreadClear(&pMgmt->keySyncThread);
   }
 }
 
@@ -481,6 +627,24 @@ int32_t dmStartAuditThread(SDnodeMgmt *pMgmt) {
   return 0;
 }
 
+int32_t dmStartMetricsThread(SDnodeMgmt *pMgmt) {
+  int32_t code = 0;
+#ifdef USE_MONITOR
+  TdThreadAttr thAttr;
+  (void)taosThreadAttrInit(&thAttr);
+  (void)taosThreadAttrSetDetachState(&thAttr, PTHREAD_CREATE_JOINABLE);
+  if (taosThreadCreate(&pMgmt->metricsThread, &thAttr, dmMetricsThreadFp, pMgmt) != 0) {
+    code = TAOS_SYSTEM_ERROR(ERRNO);
+    dError("failed to create metrics thread since %s", tstrerror(code));
+    return code;
+  }
+
+  (void)taosThreadAttrDestroy(&thAttr);
+  tmsgReportStartup("dnode-metrics", "initialized");
+#endif
+  return 0;
+}
+
 void dmStopMonitorThread(SDnodeMgmt *pMgmt) {
 #ifdef USE_MONITOR
   if (taosCheckPthreadValid(pMgmt->monitorThread)) {
@@ -534,6 +698,13 @@ void dmStopCrashReportThread(SDnodeMgmt *pMgmt) {
 #endif
 }
 
+void dmStopMetricsThread(SDnodeMgmt *pMgmt) {
+  if (taosCheckPthreadValid(pMgmt->metricsThread)) {
+    (void)taosThreadJoin(pMgmt->metricsThread, NULL);
+    taosThreadClear(&pMgmt->metricsThread);
+  }
+}
+
 static void dmProcessMgmtQueue(SQueueInfo *pInfo, SRpcMsg *pMsg) {
   SDnodeMgmt *pMgmt = pInfo->ahandle;
   int32_t     code = -1;
@@ -565,8 +736,17 @@ static void dmProcessMgmtQueue(SQueueInfo *pInfo, SRpcMsg *pMsg) {
     case TDMT_DND_CREATE_SNODE:
       code = (*pMgmt->processCreateNodeFp)(SNODE, pMsg);
       break;
+    case TDMT_DND_ALTER_SNODE:
+      code = (*pMgmt->processAlterNodeFp)(SNODE, pMsg);
+      break;
     case TDMT_DND_DROP_SNODE:
       code = (*pMgmt->processDropNodeFp)(SNODE, pMsg);
+      break;
+    case TDMT_DND_CREATE_BNODE:
+      code = (*pMgmt->processCreateNodeFp)(BNODE, pMsg);
+      break;
+    case TDMT_DND_DROP_BNODE:
+      code = (*pMgmt->processDropNodeFp)(BNODE, pMsg);
       break;
     case TDMT_DND_ALTER_MNODE_TYPE:
       code = (*pMgmt->processAlterNodeTypeFp)(MNODE, pMsg);
@@ -585,6 +765,65 @@ static void dmProcessMgmtQueue(SQueueInfo *pInfo, SRpcMsg *pMsg) {
       break;
     case TDMT_DND_CREATE_ENCRYPT_KEY:
       code = dmProcessCreateEncryptKeyReq(pMgmt, pMsg);
+      break;
+    case TDMT_MND_ALTER_ENCRYPT_KEY:
+      code = dmProcessAlterEncryptKeyReq(pMgmt, pMsg);
+      break;
+    case TDMT_MND_ALTER_KEY_EXPIRATION:
+      code = dmProcessAlterKeyExpirationReq(pMgmt, pMsg);
+      break;
+    case TDMT_DND_RELOAD_DNODE_TLS:
+      code = dmProcessReloadTlsConfig(pMgmt, pMsg);
+      // code = dmProcessReloadEncryptKeyReq(pMgmt, pMsg);
+      break;
+    default:
+
+      code = TSDB_CODE_MSG_NOT_PROCESSED;
+      dGError("msg:%p, not processed in mgmt queue, reason:%s", pMsg, tstrerror(code));
+      break;
+  }
+
+  if (IsReq(pMsg)) {
+    if (code != 0 && terrno != 0) code = terrno;
+    SRpcMsg rsp = {
+        .code = code,
+        .pCont = pMsg->info.rsp,
+        .contLen = pMsg->info.rspLen,
+        .info = pMsg->info,
+    };
+
+    code = rpcSendResponse(&rsp);
+    if (code != 0) {
+      dError("failed to send response since %s", tstrerror(code));
+    }
+  }
+
+  dTrace("msg:%p, is freed, code:0x%x", pMsg, code);
+  rpcFreeCont(pMsg->pCont);
+  taosFreeQitem(pMsg);
+}
+
+int32_t dmDispatchStreamHbMsg(struct SDispatchWorkerPool* pPool, void* pParam, int32_t *pWorkerIdx) {
+  SRpcMsg* pMsg = (SRpcMsg*)pParam;
+  if (pMsg->code) {
+    *pWorkerIdx = 0;
+    return TSDB_CODE_SUCCESS;
+  }
+  SStreamMsgGrpHeader* pHeader = (SStreamMsgGrpHeader*)pMsg->pCont;
+  *pWorkerIdx = pHeader->streamGid % tsNumOfStreamMgmtThreads;
+  return TSDB_CODE_SUCCESS;
+}
+
+
+static void dmProcessStreamMgmtQueue(SQueueInfo *pInfo, SRpcMsg *pMsg) {
+  SDnodeMgmt *pMgmt = pInfo->ahandle;
+  int32_t     code = -1;
+  STraceId   *trace = &pMsg->info.traceId;
+  dGTrace("msg:%p, will be processed in dnode stream mgmt queue, type:%s", pMsg, TMSG_INFO(pMsg->msgType));
+
+  switch (pMsg->msgType) {
+    case TDMT_MND_STREAM_HEARTBEAT_RSP:
+      code = dmProcessStreamHbRsp(pMgmt, pMsg);
       break;
     default:
       code = TSDB_CODE_MSG_NOT_PROCESSED;
@@ -612,6 +851,7 @@ static void dmProcessMgmtQueue(SQueueInfo *pInfo, SRpcMsg *pMsg) {
   taosFreeQitem(pMsg);
 }
 
+
 int32_t dmStartWorker(SDnodeMgmt *pMgmt) {
   int32_t          code = 0;
   SSingleWorkerCfg cfg = {
@@ -626,12 +866,27 @@ int32_t dmStartWorker(SDnodeMgmt *pMgmt) {
     return code;
   }
 
+  SDispatchWorkerPool* pStMgmtpool = &pMgmt->streamMgmtWorker;
+  pStMgmtpool->max = tsNumOfStreamMgmtThreads;
+  pStMgmtpool->name = "dnode-stream-mgmt";
+  code = tDispatchWorkerInit(pStMgmtpool);
+  if (code != 0) {
+    dError("failed to start dnode-stream-mgmt worker since %s", tstrerror(code));
+    return code;
+  }
+  code = tDispatchWorkerAllocQueue(pStMgmtpool, pMgmt, (FItem)dmProcessStreamMgmtQueue, dmDispatchStreamHbMsg);
+  if (code != 0) {
+    dError("failed to allocate dnode-stream-mgmt worker queue since %s", tstrerror(code));
+    return code;
+  }
+
   dDebug("dnode workers are initialized");
   return 0;
 }
 
 void dmStopWorker(SDnodeMgmt *pMgmt) {
   tSingleWorkerCleanup(&pMgmt->mgmtWorker);
+  tDispatchWorkerCleanup(&pMgmt->streamMgmtWorker);
   dDebug("dnode workers are closed");
 }
 
@@ -639,4 +894,8 @@ int32_t dmPutNodeMsgToMgmtQueue(SDnodeMgmt *pMgmt, SRpcMsg *pMsg) {
   SSingleWorker *pWorker = &pMgmt->mgmtWorker;
   dTrace("msg:%p, put into worker %s", pMsg, pWorker->name);
   return taosWriteQitem(pWorker->queue, pMsg);
+}
+
+int32_t dmPutMsgToStreamMgmtQueue(SDnodeMgmt *pMgmt, SRpcMsg *pMsg) {
+  return tAddTaskIntoDispatchWorkerPool(&pMgmt->streamMgmtWorker, pMsg);
 }

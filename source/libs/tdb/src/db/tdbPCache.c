@@ -37,7 +37,7 @@ static inline uint32_t tdbPCachePageHash(const SPgid *pPgid) {
 }
 
 static int    tdbPCacheOpenImpl(SPCache *pCache);
-static SPage *tdbPCacheFetchImpl(SPCache *pCache, const SPgid *pPgid, TXN *pTxn, bool force);
+static SPage *tdbPCacheFetchImpl(SPCache *pCache, const SPgid *pPgid, TXN *pTxn, bool force, bool* loaded);
 static void   tdbPCachePinPage(SPCache *pCache, SPage *pPage);
 static void   tdbPCacheRemovePageFromHash(SPCache *pCache, SPage *pPage);
 static void   tdbPCacheAddPageToHash(SPCache *pCache, SPage *pPage);
@@ -130,6 +130,9 @@ static int tdbPCacheAlterImpl(SPCache *pCache, int32_t nPage) {
     for (int32_t iPage = pCache->nPages; iPage < nPage; iPage++) {
       int32_t code = tdbPageCreate(pCache->szPage, &aPage[iPage], tdbDefaultMalloc, NULL);
       if (code) {
+        for (int32_t j = pCache->nPages; j < iPage; j++) {
+          tdbPageDestroy(aPage[j], tdbDefaultFree, NULL);
+        }
         tdbOsFree(aPage);
         return code;
       }
@@ -188,13 +191,13 @@ int tdbPCacheAlter(SPCache *pCache, int32_t nPage) {
   return code;
 }
 
-SPage *tdbPCacheFetch(SPCache *pCache, const SPgid *pPgid, TXN *pTxn, bool force) {
+SPage *tdbPCacheFetch(SPCache *pCache, const SPgid *pPgid, TXN *pTxn, bool force, bool* loaded) {
   SPage *pPage;
   i32    nRef = 0;
 
   tdbPCacheLock(pCache);
 
-  pPage = tdbPCacheFetchImpl(pCache, pPgid, pTxn, force);
+  pPage = tdbPCacheFetchImpl(pCache, pPgid, pTxn, force, loaded);
   if (pPage) {
     nRef = tdbRefPage(pPage);
   }
@@ -296,7 +299,7 @@ void tdbPCacheRelease(SPCache *pCache, SPage *pPage, TXN *pTxn) {
 
 int tdbPCacheGetPageSize(SPCache *pCache) { return pCache->szPage; }
 
-static SPage *tdbPCacheFetchImpl(SPCache *pCache, const SPgid *pPgid, TXN *pTxn, bool force) {
+static SPage *tdbPCacheFetchImpl(SPCache *pCache, const SPgid *pPgid, TXN *pTxn, bool force, bool* loaded) {
   int    ret = 0;
   SPage *pPage = NULL;
   SPage *pPageH = NULL;
@@ -305,6 +308,10 @@ static SPage *tdbPCacheFetchImpl(SPCache *pCache, const SPgid *pPgid, TXN *pTxn,
     tdbError("tdb/pcache: null ptr pTxn, fetch impl failed.");
     terrno = TSDB_CODE_INVALID_PARA;
     return NULL;
+  }
+
+  if (loaded) {
+    *loaded = false;
   }
 
   // 1. Search the hash table
@@ -317,6 +324,9 @@ static SPage *tdbPCacheFetchImpl(SPCache *pCache, const SPgid *pPgid, TXN *pTxn,
   if (pPage) {
     if (pPage->isLocal || TDB_TXN_IS_WRITE(pTxn)) {
       tdbPCachePinPage(pCache, pPage);
+      if (loaded) {
+        *loaded = true;
+      }
       return pPage;
     }
   }

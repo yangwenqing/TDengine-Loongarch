@@ -4,7 +4,7 @@ MESSAGE(STATUS "build parser unit test")
 # GoogleTest requires at least C++11
 SET(CMAKE_CXX_STANDARD 11)
 
-if(${TD_LINUX})
+if(TD_LINUX)
     add_executable(commonTest "commonTests.cpp")
     DEP_ext_gtest(commonTest)
     target_link_libraries(commonTest PRIVATE os util common)
@@ -33,37 +33,51 @@ add_test(
     COMMAND dataformatTest
 )
 
-# cosCpTest.cpp
-add_executable(cosCpTest "cosCpTest.cpp")
-DEP_ext_gtest(cosCpTest)
-target_link_libraries(cosCpTest PRIVATE util common)
+# ttimeNaturalUnitsTest.cpp
+add_executable(ttimeNaturalUnitsTest "ttimeNaturalUnitsTest.cpp")
+DEP_ext_gtest(ttimeNaturalUnitsTest)
+target_link_libraries(ttimeNaturalUnitsTest PRIVATE common)
 target_include_directories(
-    cosCpTest
+    ttimeNaturalUnitsTest
     PUBLIC "${TD_SOURCE_DIR}/include/common"
     PUBLIC "${TD_SOURCE_DIR}/include/util"
 )
 add_test(
-    NAME cosCpTest
-    COMMAND cosCpTest
+    NAME ttimeNaturalUnitsTest
+    COMMAND ttimeNaturalUnitsTest
 )
 
-if(${TD_LINUX})
-    # cosTest.cpp
-    add_executable(cosTest "cosTest.cpp")
-    DEP_ext_gtest(cosTest)
-    target_link_libraries(cosTest PRIVATE util common)
-    target_include_directories(
-        cosTest
-        PUBLIC "${TD_SOURCE_DIR}/include/common"
-        PUBLIC "${TD_SOURCE_DIR}/include/util"
-    )
-    add_test(
-        NAME cosTest
-        COMMAND cosTest
-    )
-endif()
+# # cosCpTest.cpp
+# add_executable(cosCpTest "cosCpTest.cpp")
+# DEP_ext_gtest(cosCpTest)
+# target_link_libraries(cosCpTest PRIVATE util common)
+# target_include_directories(
+    # cosCpTest
+    # PUBLIC "${TD_SOURCE_DIR}/include/common"
+    # PUBLIC "${TD_SOURCE_DIR}/include/util"
+# )
+# add_test(
+    # NAME cosCpTest
+    # COMMAND cosCpTest
+# )
 
-if(${TD_LINUX})
+# if(${TD_LINUX})
+    # # cosTest.cpp
+    # add_executable(cosTest "cosTest.cpp")
+    # DEP_ext_gtest(cosTest)
+    # target_link_libraries(cosTest PRIVATE util common)
+    # target_include_directories(
+        # cosTest
+        # PUBLIC "${TD_SOURCE_DIR}/include/common"
+        # PUBLIC "${TD_SOURCE_DIR}/include/util"
+    # )
+    # add_test(
+        # NAME cosTest
+        # COMMAND cosTest
+    # )
+# endif()
+
+if(TD_LINUX)
     # tmsg test
     add_executable(tmsgTest "")
     DEP_ext_gtest(tmsgTest)

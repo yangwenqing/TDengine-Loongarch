@@ -28,8 +28,10 @@ extern "C" {
 typedef struct STranslateContext {
   SParseContext*   pParseCxt;
   int32_t          errCode;
+  ESubQueryType    expSubQueryType;
   SMsgBuf          msgBuf;
   SArray*          pNsLevel;  // element is SArray*, the element of this subarray is STableNode*
+  SNodeList*       pSubQueries; // sub queries NOT from FROM clause， SNodeList<SNode*>
   int32_t          currLevel;
   int32_t          levelNo;
   ESqlClause       currClause;
@@ -40,7 +42,10 @@ typedef struct STranslateContext {
   SHashObj*        pTargetTables;
   SExplainOptions* pExplainOpt;
   SParseMetaCache* pMetaCache;
-  bool             createStream;
+  bool             isExprSubQ;
+  bool             isCorrelatedSubQ;
+  bool             hasNonLocalSubQ;
+  bool             hasLocalSubQ;
   bool             stableQuery;
   bool             showRewrite;
   bool             withOpt;
@@ -49,6 +54,9 @@ typedef struct STranslateContext {
   bool             dual;  // whether select stmt without from stmt, true for without.
   bool             skipCheck;
   bool             refTable;
+  bool             isCurrOpIn;
+  ENodeType        origStmtType;
+  SParseStreamInfo streamInfo;
 } STranslateContext;
 
 int32_t biRewriteToTbnameFunc(STranslateContext* pCxt, SNode** ppNode, bool* pRet);
@@ -57,6 +65,11 @@ int32_t biCheckCreateTableTbnameCol(STranslateContext* pCxt, SNodeList* pTags, S
 int32_t findTable(STranslateContext* pCxt, const char* pTableAlias, STableNode** pOutput);
 int32_t getTargetMetaImpl(SParseContext* pParCxt, SParseMetaCache* pMetaCache, const SName* pName, STableMeta** pMeta,
                           bool couldBeView);
+
+#ifdef TD_ENTERPRISE
+int32_t translateCheckPrivCols(STranslateContext* pCxt, SSelectStmt* pSelect);
+int32_t translateProcessMaskColFunc(STranslateContext* pCxt, SSelectStmt* pSelect);
+#endif
 
 #ifdef __cplusplus
 }

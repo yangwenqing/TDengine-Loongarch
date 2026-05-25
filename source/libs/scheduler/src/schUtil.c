@@ -63,10 +63,10 @@ int32_t schDumpEpSet(SEpSet *pEpSet, char **ppRes) {
   }
 
   int32_t n = 0;
-  n += tsnprintf(str + n, maxSize - n, "numOfEps:%d, inUse:%d eps:", pEpSet->numOfEps, pEpSet->inUse);
+  n += snprintf(str + n, maxSize - n, "numOfEps:%d, inUse:%d eps:", pEpSet->numOfEps, pEpSet->inUse);
   for (int32_t i = 0; i < pEpSet->numOfEps; ++i) {
     SEp *pEp = &pEpSet->eps[i];
-    n += tsnprintf(str + n, maxSize - n, "[%s:%d]", pEp->fqdn, pEp->port);
+    n += snprintf(str + n, maxSize - n, "[%s:%d]", pEp->fqdn, pEp->port);
   }
 
   *ppRes = str;
@@ -106,6 +106,8 @@ void schCleanClusterHb(void *pTrans) {
       code = taosHashRemove(schMgmt.hbConnections, pEpId, sizeof(SQueryNodeEpId));
       if (code) {
         qError("taosHashRemove hb connection failed, error:%s", tstrerror(code));
+      } else {
+        qInfo("hb cleaned from hbConnections for epId:%d", pEpId->nodeId);
       }
     }
 
@@ -132,6 +134,8 @@ int32_t schRemoveHbConnection(SSchJob *pJob, SSchTask *pTask, SQueryNodeEpId *ep
     code = taosHashRemove(schMgmt.hbConnections, epId, sizeof(SQueryNodeEpId));
     if (code) {
       SCH_TASK_WLOG("taosHashRemove hb connection failed, error:%s", tstrerror(code));
+    } else {
+      SCH_TASK_ILOG("hb mark removed from hbConnections, vgId:%d", epId->nodeId);
     }
   }
   SCH_UNLOCK(SCH_WRITE, &schMgmt.hbLock);
@@ -159,8 +163,10 @@ int32_t schAddHbConnection(SSchJob *pJob, SSchTask *pTask, SQueryNodeEpId *epId,
       return TSDB_CODE_SUCCESS;
     }
 
-    qError("taosHashPut hb trans failed, nodeId:%d, fqdn:%s, port:%d", epId->nodeId, epId->ep.fqdn, epId->ep.port);
+    qError("taosHashPut hb pTrans:%p failed, nodeId:%d, fqdn:%s:%d", hb.trans.pTrans, epId->nodeId, epId->ep.fqdn, epId->ep.port);
     SCH_ERR_RET(code);
+  } else {
+    qInfo("pTrans:%p add to hbConnections for epId(vgId):%d, fqdn:%s:%d", hb.trans.pTrans, epId->nodeId, epId->ep.fqdn, epId->ep.port);
   }
 
   SCH_UNLOCK(SCH_WRITE, &schMgmt.hbLock);
@@ -200,26 +206,22 @@ void schDeregisterTaskHb(SSchJob *pJob, SSchTask *pTask) {
     return;
   }
 
-  SQueryNodeAddr *addr = taosArrayGet(pTask->candidateAddrs, pTask->candidateIdx);
-  if (NULL == addr) {
-    SCH_TASK_ELOG("fail to get the %dth condidateAddr in task, totalNum:%d", pTask->candidateIdx,
-                  (int32_t)taosArrayGetSize(pTask->candidateAddrs));
+  SQueryNodeAddr *pAddr = NULL;
+  if (schGetTaskCurrentNodeAddr(pTask, pJob, &pAddr) != TSDB_CODE_SUCCESS) {
     return;
   }
 
-  SQueryNodeEpId epId = {0};
+  SQueryNodeEpId epId = {.nodeId = pAddr->nodeId};
 
-  epId.nodeId = addr->nodeId;
-
-  SEp *pEp = SCH_GET_CUR_EP(addr);
-  TAOS_STRCPY(epId.ep.fqdn, pEp->fqdn);
+  SEp *pEp = SCH_GET_CUR_EP(pAddr);
+  tstrncpy(epId.ep.fqdn, pEp->fqdn, sizeof(epId.ep.fqdn));
   epId.ep.port = pEp->port;
 
   SCH_LOCK(SCH_READ, &schMgmt.hbLock);
   SSchHbTrans *hb = taosHashGet(schMgmt.hbConnections, &epId, sizeof(SQueryNodeEpId));
   if (NULL == hb) {
     SCH_UNLOCK(SCH_READ, &schMgmt.hbLock);
-    SCH_TASK_WLOG("nodeId %d fqdn %s port %d not in hb connections", epId.nodeId, epId.ep.fqdn, epId.ep.port);
+    SCH_TASK_WLOG("nodeId:%d fqdn:%s:%d not in hb connections", epId.nodeId, epId.ep.fqdn, epId.ep.port);
     return;
   }
 
@@ -239,22 +241,19 @@ int32_t schEnsureHbConnection(SSchJob *pJob, SSchTask *pTask) {
     return TSDB_CODE_SUCCESS;
   }
 
-  SQueryNodeAddr *addr = taosArrayGet(pTask->candidateAddrs, pTask->candidateIdx);
-  if (NULL == addr) {
-    SCH_TASK_ELOG("fail to get the %dth condidateAddr in task, totalNum:%d", pTask->candidateIdx,
-                  (int32_t)taosArrayGetSize(pTask->candidateAddrs));
-    return TSDB_CODE_SCH_INTERNAL_ERROR;
+  SQueryNodeAddr *pAddr = NULL;
+  int32_t code = schGetTaskCurrentNodeAddr(pTask, pJob, &pAddr);
+  if (code != TSDB_CODE_SUCCESS) {
+    return code;
   }
 
-  SQueryNodeEpId epId = {0};
+  SQueryNodeEpId epId = {.nodeId = pAddr->nodeId};
 
-  epId.nodeId = addr->nodeId;
-
-  SEp *pEp = SCH_GET_CUR_EP(addr);
-  TAOS_STRCPY(epId.ep.fqdn, pEp->fqdn);
+  SEp *pEp = SCH_GET_CUR_EP(pAddr);
+  tstrncpy(epId.ep.fqdn, pEp->fqdn, sizeof(epId.ep.fqdn));
   epId.ep.port = pEp->port;
 
-  SCH_ERR_RET(schRegisterHbConnection(pJob, pTask, &epId));
+  (void)schRegisterHbConnection(pJob, pTask, &epId);
 
   pTask->registerdHb = true;
 
@@ -278,7 +277,7 @@ int32_t schUpdateHbConnection(SQueryNodeEpId *epId, SSchTrans *trans) {
   SCH_UNLOCK(SCH_WRITE, &hb->lock);
   SCH_UNLOCK(SCH_READ, &schMgmt.hbLock);
 
-  qDebug("hb connection updated, nodeId:%d, fqdn:%s, port:%d, pTrans:%p, pHandle:%p", epId->nodeId, epId->ep.fqdn,
+  qInfo("hb connection updated, nodeId:%d, fqdn:%s, port:%d, pTrans:%p, pHandle:%p", epId->nodeId, epId->ep.fqdn,
          epId->ep.port, trans->pTrans, trans->pHandle);
 
   return TSDB_CODE_SUCCESS;
@@ -387,8 +386,8 @@ int32_t schValidateSubplan(SSchJob *pJob, SSubplan *pSubplan, int32_t level, int
     SCH_ERR_RET(TSDB_CODE_QRY_INVALID_INPUT);
   }
 
-  if (pSubplan->subplanType < SUBPLAN_TYPE_MERGE || pSubplan->subplanType > SUBPLAN_TYPE_COMPUTE) {
-    SCH_JOB_ELOG("invalid subplanType %d, level:%d, subplan idx:%d", pSubplan->subplanType, level, idx);
+  if (pSubplan->subplanType < SUBPLAN_TYPE_MERGE || pSubplan->subplanType > SUBPLAN_TYPE_HSYSSCAN) {
+    SCH_JOB_ELOG("invalid subplanType:%d, level:%d, subplan idx:%d", pSubplan->subplanType, level, idx);
     SCH_ERR_RET(TSDB_CODE_QRY_INVALID_INPUT);
   }
 
@@ -442,4 +441,18 @@ void schStopTaskDelayTimer(SSchJob *pJob, SSchTask *pTask, bool syncOp) {
       SCH_TASK_WLOG("stop task delayTimer %" PRIuPTR " failed, may stopped, status:%d", (uintptr_t)delayTimer, pTask->status);
     }
   }
+}
+
+int32_t schGetTaskCurrentNodeAddr(SSchTask *pTask, SSchJob *pJob, SQueryNodeAddr **ppAddr) {
+  *ppAddr = NULL;
+
+  SQueryNodeAddr *p = taosArrayGet(pTask->candidateAddrs, pTask->candidateIdx);
+  if (NULL == p) {
+    SCH_TASK_ELOG("fail to get the %dth condidateAddr in task, totalNum:%d", pTask->candidateIdx,
+                  (int32_t)taosArrayGetSize(pTask->candidateAddrs));
+    SCH_ERR_RET(TSDB_CODE_SCH_INTERNAL_ERROR);
+  }
+
+  *ppAddr = p;
+  return TSDB_CODE_SUCCESS;
 }

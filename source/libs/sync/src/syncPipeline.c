@@ -66,7 +66,7 @@ int32_t syncLogBufferAppend(SSyncLogBuffer* pBuf, SSyncNode* pNode, SSyncRaftEnt
   }
 
   SyncIndex appliedIndex = pNode->pFsm->FpAppliedIndexCb(pNode->pFsm);
-  if (pNode->restoreFinish && pBuf->commitIndex - appliedIndex >= TSDB_SYNC_APPLYQ_SIZE_LIMIT) {
+  if (pNode->restoreFinish && pBuf->commitIndex - appliedIndex >= tsSyncApplyQueueSize) {
     code = TSDB_CODE_SYN_WRITE_STALL;
     sError("vgId:%d, failed to append since %s, index:%" PRId64 ", commit-index:%" PRId64 ", applied-index:%" PRId64,
            pNode->vgId, tstrerror(code), index, pBuf->commitIndex, appliedIndex);
@@ -260,7 +260,12 @@ int32_t syncLogBufferInitWithoutLock(SSyncLogBuffer* pBuf, SSyncNode* pNode) {
       sWarn("vgId:%d, failed to get log entry since %s, index:%" PRId64, pNode->vgId, tstrerror(code), index);
       break;
     }
-
+#ifdef USE_MOUNT
+    if (pNode->mountVgId) {
+      SMsgHead* pMsgHead = (SMsgHead*)pEntry->data;
+      if (pMsgHead->vgId != pNode->vgId) pMsgHead->vgId = pNode->vgId;
+    }
+#endif
     bool taken = false;
     if (toIndex - index + 1 <= pBuf->size - emptySize) {
       SSyncLogBufEntry tmp = {.pItem = pEntry, .prevLogIndex = -1, .prevLogTerm = -1};
@@ -524,10 +529,16 @@ int32_t syncLogStorePersist(SSyncLogStore* pLogStore, SSyncNode* pNode, SSyncRaf
   lastVer = pLogStore->syncLogLastIndex(pLogStore);
   if (pEntry->index != lastVer + 1) return TSDB_CODE_SYN_INTERNAL_ERROR;
 
+#ifdef USE_MOUNT
+  if (pNode->mountVgId) {
+    SMsgHead* pHead = (SMsgHead*)pEntry->data;
+    if (pHead->vgId != pNode->mountVgId) pHead->vgId = pNode->mountVgId;
+  }
+#endif
   bool doFsync = syncLogStoreNeedFlush(pEntry, pNode->replicaNum);
   if ((code = pLogStore->syncLogAppendEntry(pLogStore, pEntry, doFsync)) < 0) {
-    sError("failed to persist raft entry since %s, index:%" PRId64 ", term:%" PRId64, tstrerror(code),
-           pEntry->index, pEntry->term);
+    sError("failed to persist raft entry since %s, index:%" PRId64 ", term:%" PRId64, tstrerror(code), pEntry->index,
+           pEntry->term);
     TAOS_RETURN(code);
   }
 
@@ -732,6 +743,7 @@ int32_t syncFsmExecute(SSyncNode* pNode, SSyncFSM* pFsm, ESyncState role, SyncTe
             pNode->vgId, pEntry->index, &rpcMsg.info, cbMeta.seqNum, num);
 
     code = pFsm->FpCommitCb(pFsm, &rpcMsg, &cbMeta);
+
     retry = (code != 0) && (terrno == TSDB_CODE_OUT_OF_RPC_MEMORY_QUEUE);
 
     sGTrace(&rpcMsg.info.traceId,
@@ -813,9 +825,10 @@ int32_t syncLogBufferCommit(SSyncLogBuffer* pBuf, SSyncNode* pNode, int64_t comm
   if (commitIndex <= pBuf->commitIndex) {
     sGDebug(trace, "vgId:%d, stale commit index:%" PRId64 ", notified:%" PRId64, vgId, commitIndex, pBuf->commitIndex);
     if (!pNode->restoreFinish && commitIndex > 0 && commitIndex == pBuf->commitIndex) {
+      sInfo("vgId:%d, try to get entry for restore check at index:%" PRId64, vgId, commitIndex);
       int32_t ret = syncLogBufferGetOneEntry(pBuf, pNode, commitIndex, &inBuf, &pEntry);
       if (ret != 0) {
-        sError("vgId:%d, failed to get entry at index:%" PRId64, vgId, commitIndex);
+        sWarn("vgId:%d, failed to get entry for restore check at index:%" PRId64, vgId, commitIndex);
       }
     }
     goto _out;
@@ -1106,10 +1119,13 @@ int32_t syncLogReplRecover(SSyncLogReplMgr* pMgr, SSyncNode* pNode, SyncAppendEn
     if (pMsg->fsmState == SYNC_FSM_STATE_INCOMPLETE || (!pMsg->success && pMsg->matchIndex >= pMsg->lastSendIndex)) {
       char* msg1 = " rollback match index failure";
       char* msg2 = " incomplete fsm state";
-      sInfo("vgId:%d, snapshot replication to dnode:%d, reason:%s, match index:%" PRId64 ", last sent:%" PRId64,
-            pNode->vgId, DID(&destId), (pMsg->fsmState == SYNC_FSM_STATE_INCOMPLETE ? msg2 : msg1), pMsg->matchIndex,
-            pMsg->lastSendIndex);
-      if ((code = syncNodeStartSnapshot(pNode, &destId)) < 0) {
+      sTrace("vgId:%d, is going to trigger snapshot to dnode:%d by append reply, reason:%s, match index:%" PRId64
+             ", last sent:%" PRId64,
+             pNode->vgId, DID(&destId), (pMsg->fsmState == SYNC_FSM_STATE_INCOMPLETE ? msg2 : msg1), pMsg->matchIndex,
+             pMsg->lastSendIndex);
+      pNode->snapSeq = -1;
+      if ((code = syncNodeStartSnapshot(pNode, &destId, (pMsg->fsmState == SYNC_FSM_STATE_INCOMPLETE ? msg2 : msg1))) <
+          0) {
         sError("vgId:%d, failed to start snapshot for peer dnode:%d", pNode->vgId, DID(&destId));
         TAOS_RETURN(code);
       }
@@ -1143,11 +1159,21 @@ int32_t syncLogReplRecover(SSyncLogReplMgr* pMgr, SSyncNode* pNode, SyncAppendEn
     if ((index + 1 < firstVer) || (term < 0) ||
         (term != pMsg->lastMatchTerm && (index + 1 == firstVer || index == firstVer))) {
       if (!(term >= 0 || terrno == TSDB_CODE_WAL_LOG_NOT_EXIST)) return TSDB_CODE_SYN_INTERNAL_ERROR;
-      if ((code = syncNodeStartSnapshot(pNode, &destId)) < 0) {
+      sTrace("vgId:%d, is going to trigger snapshot to dnode:%d by append reply, index:%" PRId64 ", firstVer:%" PRId64
+             ", term:%" PRId64 ", lastMatchTerm:%" PRId64,
+             pNode->vgId, DID(&destId), index, firstVer, term, pMsg->lastMatchTerm);
+      char reason[100] = {0};
+      if (index + 1 < firstVer)
+        tsnprintf(reason, 100, "matched entry not in log range, index:%" PRId64 ", firstVer:%" PRId64, index, firstVer);
+      else if (term < 0)
+        tsnprintf(reason, 100, "failed to get prev log term");
+      else
+        tsnprintf(reason, 100, "log term mismatch");
+      pNode->snapSeq = -1;
+      if ((code = syncNodeStartSnapshot(pNode, &destId, reason)) < 0) {
         sError("vgId:%d, failed to start snapshot for peer dnode:%d", pNode->vgId, DID(&destId));
         TAOS_RETURN(code);
       }
-      sInfo("vgId:%d, snapshot replication to peer dnode:%d", pNode->vgId, DID(&destId));
       return 0;
     }
 
@@ -1551,6 +1577,12 @@ int32_t syncLogBufferGetOneEntry(SSyncLogBuffer* pBuf, SSyncNode* pNode, SyncInd
   if (index > pBuf->startIndex) {  // startIndex might be dummy
     *pInBuf = true;
     *ppEntry = pBuf->entries[index % pBuf->size].pItem;
+#ifdef USE_MOUNT
+    if (pNode->mountVgId) {
+      SMsgHead* pMsgHead = (SMsgHead*)(*ppEntry)->data;
+      if (pMsgHead->vgId != pNode->vgId) pMsgHead->vgId = pNode->vgId;
+    }
+#endif
   } else {
     *pInBuf = false;
 
@@ -1558,6 +1590,7 @@ int32_t syncLogBufferGetOneEntry(SSyncLogBuffer* pBuf, SSyncNode* pNode, SyncInd
       sWarn("vgId:%d, failed to get log entry since %s, index:%" PRId64, pNode->vgId, tstrerror(code), index);
     }
   }
+
   TAOS_RETURN(code);
 }
 
@@ -1603,8 +1636,8 @@ int32_t syncLogReplSendTo(SSyncLogReplMgr* pMgr, SSyncNode* pNode, SyncIndex ind
   sGDebug(&msgOut.info.traceId,
           "vgId:%d, index:%" PRId64 ", replicate one msg to dest addr:0x%" PRIx64 ", term:%" PRId64 " prevterm:%" PRId64,
           pNode->vgId, pEntry->index, pDestId->addr, pEntry->term, prevLogTerm);
-  TAOS_CHECK_GOTO(syncNodeSendAppendEntries(pNode, pDestId, &msgOut), &lino, _err);
 
+  TAOS_CHECK_GOTO(syncNodeSendAppendEntries(pNode, pDestId, &msgOut), &lino, _err);
   if (!inBuf) {
     syncEntryDestroy(pEntry);
     pEntry = NULL;

@@ -1,19 +1,8 @@
 ---
 title: PostgreSQL
-slug: /advanced-features/data-connectors/postgresql
 ---
 
-import Image from '@theme/IdealImage';
-import imgStep01 from '../../assets/postgresql-01.png';
-import imgStep02 from '../../assets/postgresql-02.png';
-import imgStep03 from '../../assets/postgresql-03.png';
-import imgStep04 from '../../assets/postgresql-04.png';
-import imgStep05 from '../../assets/postgresql-05.png';
-import imgStep06 from '../../assets/postgresql-06.png';
-import imgStep07 from '../../assets/postgresql-07.png';
-import imgStep08 from '../../assets/postgresql-08.png';
-
-import Enterprise from '../../assets/resources/_enterprise.mdx';
+import { AddDataSource, Enterprise } from '../../assets/resources/_resources.mdx';
 
 <Enterprise/>
 
@@ -25,61 +14,37 @@ PostgreSQL is a very powerful, open-source client/server relational database man
 
 TDengine can efficiently read data from PostgreSQL and write it to TDengine, enabling historical data migration or real-time data synchronization.
 
-## Creating a Task
+## Procedure
 
-### 1. Add a Data Source
+### Add a Data Source
 
-Click the **+ Add Data Source** button in the upper left corner of the data writing page to enter the add data source page, as shown below:
+<AddDataSource connectorName="PostgreSQL" />
 
-<figure>
-<Image img={imgStep01} alt=""/>
-</figure>
-
-### 2. Configure Basic Information
-
-Enter the task name in the **Name** field, for example *`test_postgres_01`*.
-
-Select *`PostgreSQL`* from the **Type** dropdown menu, as shown below (the fields on the page will change after selection).
-
-**Proxy** is optional. If needed, you can select a specific proxy from the dropdown menu or click the **+ Create New Proxy** button on the right to create a new proxy.
-
-**Target Database** is required. You can click the **+ Create Database** button on the right to create a new database.
-
-<figure>
-<Image img={imgStep02} alt=""/>
-</figure>
-
-### 3. Configure Connection Information
+### Configure Connection Information
 
 Fill in the *`connection information for the source PostgreSQL database`* in the **Connection Configuration** area, as shown below:
 
-<figure>
-<Image img={imgStep03} alt=""/>
-</figure>
+![Configure connection information](../../assets/postgresql-03.png)
 
-### 4. Configure Authentication Information
+### Configure Authentication Information
 
 **User** Enter the user of the source PostgreSQL database, who must have read permissions in the organization.
 
 **Password** Enter the login password for the user mentioned above in the source PostgreSQL database.
 
-<figure>
-<Image img={imgStep04} alt=""/>
-</figure>
+![Configure authentication information](../../assets/postgresql-04.png)
 
-### 5. Configure Connection Options
+### Configure Connection Options
 
 **Application Name** Set the application name to identify the connected application.
 
 **SSL Mode** Set whether to negotiate a secure SSL TCP/IP connection with the server or the priority of such negotiation. The default value is PREFER. Options include DISABLE, ALLOW, PREFER, REQUIRE.
 
-<figure>
-<Image img={imgStep05} alt=""/>
-</figure>
+![Configure application name and SSL mode](../../assets/postgresql-05.png)
 
 Then click the **Check Connectivity** button, where users can click this button to check if the information filled in above can normally fetch data from the source PostgreSQL database.
 
-### 6. Configure SQL Query
+### Configure SQL Query
 
 **Subtable Field** Used to split subtables, it is a select distinct SQL statement querying non-repeated items of specified field combinations, usually corresponding to the tag in transform:
 > This configuration is mainly to solve the data migration disorder problem, and it needs to be used in conjunction with **SQL Template**, otherwise, it cannot achieve the expected effect, usage examples are as follows:
@@ -105,11 +70,9 @@ Then click the **Check Connectivity** button, where users can click this button 
 
 **Delay Duration** In real-time data synchronization scenarios, to avoid losing data due to delayed writes, each synchronization task will read data from before the delay duration.
 
-<figure>
-<Image img={imgStep06} alt=""/>
-</figure>
+![Configure data collection](../../assets/postgresql-06.png)
 
-### 7. Configure Data Mapping
+### Configure Data Mapping
 
 In the **Data Mapping** area, fill in the configuration parameters related to data mapping.
 
@@ -123,11 +86,9 @@ In **Mapping**, select the supertable in TDengine to map to, and the columns to 
 
 Click **Preview** to view the results of the mapping.
 
-<figure>
-<Image img={imgStep07} alt=""/>
-</figure>
+![Configure data mapping](../../assets/postgresql-07.png)
 
-### 8. Configure Advanced Options
+### Configure Advanced Options
 
 The **Advanced Options** area is collapsed by default, click the `>` on the right to expand it, as shown below:
 
@@ -135,10 +96,8 @@ The **Advanced Options** area is collapsed by default, click the `>` on the righ
 
 **Batch Size** The maximum number of messages or rows sent at once. The default is 10000.
 
-<figure>
-<Image img={imgStep08} alt=""/>
-</figure>
+![Configure advanced options](../../assets/postgresql-08.png)
 
-### 9. Completion
+### Completion
 
 Click the **Submit** button to complete the creation of the data synchronization task from PostgreSQL to TDengine. Return to the **Data Source List** page to view the status of the task execution.

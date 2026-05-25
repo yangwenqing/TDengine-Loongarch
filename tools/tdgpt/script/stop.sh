@@ -1,4 +1,4 @@
 #!/bin/bash
 
-# stop the uwsgi server
-/usr/local/taos/taosanode/venv/bin/uwsgi --stop /usr/local/taos/taosanode/taosanode.pid
+# stop the Gunicorn server
+kill -s TERM $(cat /usr/local/taos/taosanode/taosanode.pid)

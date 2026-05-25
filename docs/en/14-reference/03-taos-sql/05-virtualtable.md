@@ -10,7 +10,7 @@ The `CREATE VTABLE` statement is used to create virtual basic tables and virtual
 
 ### Create Virtual Supertables
 
-Refer to the `VIRTUAL` parameter in [Create Supertable](./04-stable.md#create-supertable).
+Refer to the `VIRTUAL` parameter in [Create Supertable](04-stable.md#create-a-supertable).
 
 ### Create Virtual Basic Table
 
@@ -41,19 +41,20 @@ CREATE VTABLE [IF NOT EXISTS] [db_name].vtb_name
      const_value
 ```
 
-**Usage Notes**
+Usage Notes:
 
-1. Naming rules for virtual tables/columns follow [Name Rules](./19-limit.md#naming-rules).
-2. Maximum table name length: 192 characters.
-3. The first column must be TIMESTAMP and is automatically set as primary key.
-4. Row length cannot exceed 64KB (Note: VARCHAR/NCHAR/GEOMETRY columns consume 2 extra bytes each).
-5. Specify maximum length for VARCHAR/NCHAR/GEOMETRY types (e.g., VARCHAR(20)).
-6. Use `FROM` to specify column data sources. Cross-database sources are supported via `db_name`.
-7. The timestamp column (ts) values of virtual table are merged results from all involved tables' timestamp primary keys during queries.
-8. Virtual supertables only support creating virtual subtables, virtual subtables can only use virtual supertables as template.
-9. Ensure virtual tables' column/tag data types match their source columns/tags.
-10. Virtual table names must be unique within a database and cannot conflict with table names, and it is recommended that view names do not duplicate virtual table names (not enforced). When a view and a virtual table have the same name, operations such as writing, querying, granting, and revoking permissions prioritize the virtual table with the same name. .
-11. When creating virtual subtables/basic tables, `FROM` columns must originate from basic tables/subtables (not supertables, views, or other virtual tables).
+1. Naming rules for virtual tables/columns follow [Name Rules](91-limit.md#naming-rules).
+2. The maximum number of columns in a virtual table is 32767.
+3. Maximum table name length: 192 characters.
+4. The first column must be TIMESTAMP and is automatically set as primary key.
+5. Row length cannot exceed 512KB (Note: VARCHAR/NCHAR/GEOMETRY columns consume 2 extra bytes each).
+6. Specify maximum length for VARCHAR/NCHAR/GEOMETRY types (e.g., VARCHAR(20)).
+7. Use `FROM` to specify column data sources. Cross-database sources are supported via `db_name`.
+8. The timestamp column (ts) values of virtual table are merged results from all involved tables' timestamp primary keys during queries.
+9. Virtual supertables only support creating virtual subtables, virtual subtables can only use virtual supertables as template.
+10. Ensure virtual tables' column/tag data types match their source columns/tags.
+11. Virtual table names must be unique within a database and cannot conflict with table names, and it is recommended that view names do not duplicate virtual table names (not enforced). When a view and a virtual table have the same name, operations such as writing, querying, granting, and revoking permissions prioritize the virtual table with the same name. .
+12. When creating virtual subtables/basic tables, `FROM` columns must originate from basic tables/subtables (not supertables, views, or other virtual tables).
 
 ## Query Virtual Tables
 
@@ -66,7 +67,7 @@ Virtual tables use the same query syntax as regular tables, but their dataset ma
 3. Virtual table timestamps are the union of all involved columns' origin tables' timestamps. Therefore, the number of rows in the result set may vary when different queries select different columns.
 4. Users can combine any columns from multiple tables; unselected columns are excluded.
 
-**Example**
+Example:
 
 Given tables t1, t2, t3 with data:
 
@@ -118,7 +119,7 @@ Given tables t1, t2, t3 with data:
         <td align="center">4</td>
         <td align="center">0:00:04</td>
         <td align="center">40</td>
-        <td align="center">0:00:03</td>
+        <td align="center"></td>
         <td align="center"></td>
         <td align="center"></td>
     </tr>
@@ -366,12 +367,14 @@ Virtual table permissions are categorized into READ and WRITE. Query operations 
 ### Syntax
 
 #### Grant
+
 ```sql
 GRANT privileges ON [db_name.]vtable_name TO user_name
 privileges: { ALL | READ | WRITE }
 ```
 
 #### Revoke
+
 ```sql
 REVOKE privileges ON [db_name.]vtable_name FROM user_name
     privileges: { ALL | READ | WRITE }

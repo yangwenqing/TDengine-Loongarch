@@ -1,27 +1,30 @@
 import subprocess
 import sys
 import os
+import platform
+import copy
 from new_test_framework import taostest
 
 import taos
 import taosrest
 import taosws
 import yaml
-import logging
 import socket
 import configparser
 import shutil
-#from utils.log import testLog
 from .sql import tdSql
-from .log import testLog, tdLog
+from .log import tdLog
+from .pathFinding import find_proj_path
 from .server.cluster import cluster, clusterDnodes
 from .server.dnodes import tdDnodes
 from .taosadapter import tAdapter
 from .common import tdCom
 from .taoskeeper import taoskeeper
 
-
-
+def load_yaml_config(filename):
+    config_path = os.path.join(os.path.dirname(__file__), filename)
+    with open(config_path, "r") as f:
+        return yaml.safe_load(f)
 
 class BeforeTest:
     def __init__(self, request):
@@ -34,14 +37,15 @@ class BeforeTest:
         self.config = {}
         for section in temp_config.sections():
             self.config[section] = dict(temp_config.items(section))
-        testLog.debug(f"config_: {self.config}")
+        tdLog.debug(f"config_: {self.config}")
+        self.log_level = request.config.getoption("--log-level").lower() if request.config.getoption("--log-level") else "info"
     def install_taos(self):
         pass
 
-    def deploy_taos(self, yaml_file, mnodes_num=1):
+    def deploy_taos(self, yaml_file, mnodes_num=1, clean=False):
         """
         get env directory from request;
-        use yaml file for tostest run;
+        use yaml file for taostest run;
         """
         # 初始化目录
         # 获取根目录
@@ -54,7 +58,7 @@ class BeforeTest:
         
         # 检查目录是否存在
         if not all(os.path.exists(d) for d in required_dirs):
-            testLog.debug("Required directories do not exist. Initializing...")
+            tdLog.debug("Required directories do not exist. Initializing...")
             # 调用初始化命令
             try:
                 #process = subprocess.Popen([sys.executable, "taostest", "--init"],
@@ -70,18 +74,27 @@ class BeforeTest:
                 #process.wait()
                 result = taostest.main({"test_root": self.root_dir, "init": True})
                 if result != 0:
-                    testLog.error(f"Error run taostest --init: {result}")
+                    tdLog.error(f"Error run taostest --init: {result}")
             except Exception as e:
-                testLog.exit(f"Error run taostest --init: {e}")
+                tdLog.exit(f"Error run taostest --init: {e}")
 
-        testLog.debug(f"Deploying environment with config: {yaml_file}")
+        tdLog.debug(f"Deploying environment with config: {yaml_file}")
+        setup_params = {
+            "test_root": self.root_dir,
+            "setup": yaml_file,
+            #"mnode_count": mnodes_num,
+            "log_level": self.log_level
+        }
+        if clean:
+            setup_params["clean"] = ''
+
         try:
             #subprocess.run([sys.executable, f"taostest --setup {yaml_file} --mnode-count {mnodes_num}"], check=True, text=True, shell=True, env=env_vars)
-            result = taostest.main({"test_root": self.root_dir, "setup": yaml_file, "mnode_count": mnodes_num})
+            result = taostest.main(setup_params)
             if result != 0:
-                testLog.error(f"Error run taostest --setup {yaml_file} --mnode-count {mnodes_num}: {result}")
+                tdLog.error(f"Error run taostest --setup {yaml_file}: {result}")
         except Exception as e:
-            testLog.error(f"Exception run taostest --setup {yaml_file} --mnode-count {mnodes_num}: {e}")
+            tdLog.error(f"Exception run taostest --setup {yaml_file}: {e}")
 
     def configure_test(self, yaml_file):
 
@@ -113,7 +126,7 @@ class BeforeTest:
             dnode_info['logDir'] = dnode['config']['logDir']
             dnode_info['config_dir'] = dnode['config_dir']
             denodes.append(dnode_info)
-        testLog.debug(f"[BeforeTest.configure_test] dnodes: {denodes}")
+        tdLog.debug(f"[BeforeTest.configure_test] dnodes: {denodes}")
         request.session.denodes = denodes
         self.denodes = denodes
 
@@ -122,22 +135,52 @@ class BeforeTest:
         '''
         创建module级别的数据库
         '''
-        testLog.debug(f"[BeforeTest.create_database] Creating database: {db_name}")
+        tdLog.debug(f"[BeforeTest.create_database] Creating database: {db_name}")
         try:
             conn = taos.connect(host=host, port=port)
             tdSql = self.get_tdsql(conn)
             tdSql.create_database(db_name, drop=False)
         except Exception as e:
-            testLog.error(f"[BeforeTest.create_database] Error create database: {e}")
+            tdLog.error(f"[BeforeTest.create_database] Error create database: {e}")
         finally:
             conn.close()
 
 
     def get_taos_conn(self, request):
         if request.session.restful:
-            return taosrest.connect(url=f"http://{request.session.host}:6041", timezone="utc")
+            conn = taosrest.connect(url=f"http://{request.session.host}:6041", timezone="utc")
         else:
-            return taos.connect(host=request.session.host, port=request.session.port)
+            # Use cfgDir (directory path) for taos_options(ConfigDir); cfgPath is a file path
+            # which some versions of TDengine C library may not interpret correctly as a config dir.
+            cfg_opt = getattr(tdDnodes.sim, 'cfgDir', None) or tdDnodes.sim.cfgPath
+            # Explicitly pass serverPort to avoid C library global-init caching stale port.
+            # The taosd startup probe (taosd.py) calls taos.connect(port=N) without config=,
+            # which initialises the C library with the default config dir (port 6030).
+            # A subsequent taos_options(CONFIGDIR, cfg_opt) may be a no-op post-init, so
+            # passing port explicitly is the only reliable way to reach a non-standard port.
+            try:
+                _port = int(
+                    request.session.yaml_data["settings"][0]["spec"]["dnodes"][0]
+                    ["config"].get("serverPort", 6030)
+                )
+            except Exception:
+                _port = 6030
+            conn = taos.connect(host=request.session.host, port=_port, config=cfg_opt)
+        # Apply pending client-side config via ALTER LOCAL.
+        # This overrides any earlier C-library initialization (e.g. from the startup probe)
+        # that may have loaded default values before the psim cfg was written.
+        pending = getattr(self, '_pending_client_cfg', {})
+        if pending:
+            cursor = conn.cursor()
+            for _k, _v in pending.items():
+                try:
+                    cursor.execute(f'alter local "{_k}" "{_v}"')
+                    tdLog.info(f"clientCfg applied via ALTER LOCAL: {_k}={_v}")
+                except Exception as _alter_err:
+                    tdLog.notice(f"clientCfg ALTER LOCAL {_k}={_v} failed (ignored): {_alter_err}")
+            cursor.close()
+            self._pending_client_cfg = {}  # consume: prevent leaking to next class
+        return conn
 
     def get_tdsql(self, conn):
         tdSql.init(conn.cursor())
@@ -150,9 +193,9 @@ class BeforeTest:
             #subprocess.run([sys.executable, f"taostest --destroy {yaml_file}"], check=True, text=True, shell=True, env=env_vars)
             result = taostest.main({"test_root": self.root_dir, "destroy": yaml_file})
             if result != 0:
-                testLog.error(f"[BeforeTest.destroy] Error run taostest --destroy: {result}")
+                tdLog.error(f"[BeforeTest.destroy] Error run taostest --destroy: {result}")
         except Exception as e:
-            testLog.error(f"[BeforeTest.destroy] Error run taostest --destroy: {e}")
+            tdLog.error(f"[BeforeTest.destroy] Error run taostest --destroy: {e}")
         
     def get_config_from_param(self, request):
         work_dir = request.session.work_dir
@@ -163,16 +206,16 @@ class BeforeTest:
         cfg_path = os.path.join(work_dir, 'cfg')
         #bin_path = os.path.dirname(self.getPath("taosd"))
         lib_path = os.path.join(os.path.dirname(request.session.taos_bin_path), 'lib')
-        testLog.debug(f"lib_path: {lib_path}")
+        tdLog.debug(f"lib_path: {lib_path}")
         #os.environ["LD_LIBRARY_PATH"] = f"{lib_path}:{os.environ['LD_LIBRARY_PATH']}"
         #if os.path.exists(f"{lib_path}/libtaos.so") and lib_path != "/usr/lib":
         #    libso_file = os.path.basename(subprocess.check_output([f"ls -l {lib_path}/libtaos.so.3.3* | awk '{{print $9}}'"], shell=True).splitlines()[0].decode())
-        #    testLog.debug(f"libso_file: {libso_file}")
+        #    tdLog.debug(f"libso_file: {libso_file}")
         #    subprocess.run([f"rm -rf /usr/lib/libtaos.so && ln -s {lib_path}/libtaos.so /usr/lib/libtaos.so"], check=True, text=True, shell=True)
         #    subprocess.run([f"rm -rf /usr/lib/libtaos.so.1 && ln -s {lib_path}/{libso_file} /usr/lib/libtaos.so.1"], check=True, text=True, shell=True)
         # os.environ["LIB_PATH"]= f"{lib_path}:{os.environ['LIB_PATH']}"
         #os.environ["LIBRARY_PATH"]= f"{lib_path}:{os.environ['LIBRARY_PATH']}"
-        #testLog.info(f"os.environ: {os.environ}")
+        #tdLog.info(f"os.environ: {os.environ}")
         yaml_data = {
             "settings": [{
                 "name": "taosd",
@@ -186,7 +229,17 @@ class BeforeTest:
                 }
             }]
         }
+        dnode_config_template = load_yaml_config(os.path.join(self.root_dir, 'env', 'taos_config.yaml'))
+        adapter_config_template = load_yaml_config(os.path.join(self.root_dir, 'env', 'taosadapter_config.yaml'))
+        taoskeeper_config_template = load_yaml_config(os.path.join(self.root_dir, 'env', 'taoskeeper_config.yaml'))
         servers = []
+        port_base = dnode_config_template["port"] if "port" in dnode_config_template else 6030
+        yaml_data["settings"][0]["spec"]["config"]["firstEP"] = f"localhost:{port_base}"
+        mqttport_base = dnode_config_template["mqttPort"] if "mqttPort" in dnode_config_template else 6083
+        taosd_binary = "taosd.exe" if sys.platform == "win32" else "taosd"
+        taosadapter_binary = "taosadapter.exe" if sys.platform == "win32" else "taosadapter"
+        taoskeeper_binary = "taoskeeper.exe" if sys.platform == "win32" else "taoskeeper"
+
         for i in range(request.session.denodes_num):
             dnode_cfg_path = os.path.join(work_dir, f"dnode{i+1}", "cfg")
             log_path = os.path.join(work_dir, f"dnode{i+1}", "log")
@@ -200,43 +253,21 @@ class BeforeTest:
                         if primary == 1:
                             primary = 0
             else:
-                data_path = os.path.join(work_dir, f"dnode{i+1}", "data")
+                data_path = [os.path.join(work_dir, f"dnode{i+1}", "data")]
+            dnode_config = copy.deepcopy(dnode_config_template)
+            dnode_config.pop("port", None)
+            dnode_config["mqttPort"] = mqttport_base + i * 100
+            dnode_config["dataDir"] = data_path
+            dnode_config["logDir"] = log_path
             dnode = {
-                "endpoint": f"localhost:{6030 + i * 100}",
+                "endpoint": f"localhost:{port_base + i * 100}",
                 "config_dir": dnode_cfg_path,
-                "taosdPath": os.path.join(request.session.taos_bin_path, "taosd"),
-                "config": {
-                    "dataDir": data_path,
-                    "logDir": log_path,
-                    "monitor": 0,
-                    "maxShellConns": 30000,
-                    "locale": "en_US.UTF-8",
-                    "charset": "UTF-8",
-                    "asyncLog": 0,
-                    "mDebugFlag": 135,
-                    "dDebugFlag": 131,
-                    "vDebugFlag": 131,
-                    "tqDebugFlag": 135,
-                    "cDebugFlag": 135,
-                    "stDebugFlag": 135,
-                    "smaDebugFlag": 135,
-                    "jniDebugFlag": 131,
-                    "qDebugFlag": 131,
-                    "rpcDebugFlag": 135,
-                    "tmrDebugFlag": 131,
-                    "uDebugFlag": 131,
-                    "sDebugFlag": 131,
-                    "wDebugFlag": 131,
-                    "numOfLogLines": 100000000,
-                    "statusInterval": 1,
-                    "enableQueryHb": 1,
-                    "supportVnodes": "1024",
-                    "telemetryReporting": 0
-                }
+                "taosdPath": os.path.join(request.session.taos_bin_path, taosd_binary),
+                "system": platform.system().lower(),
+                "config": dnode_config,
+                "mqttPort": dnode_config["mqttPort"],
             }
-            testLog.debug(f"[BeforeTest.ci_init_config] dnode: {dnode}")
-            if request.session.query_policy > 1:
-                dnode["config"]["queryPolicy"] = request.session.query_policy
+            tdLog.debug(f"[BeforeTest.ci_init_config] dnode: {dnode}")
             if request.session.independentMnode and i < request.session.mnodes_num:
                 dnode["config"]["supportVnodes"] = 0
             if request.session.asan:
@@ -251,34 +282,35 @@ class BeforeTest:
                 "endpoint": dnode["endpoint"],
                 "log_dir": log_path,
                 "data_dir": data_path,
-                "config": dnode["config"]
+                "config": dnode["config"],
+                "mqttPort": dnode["mqttPort"],
             }
             servers.append(server)
         request.session.servers = servers
-        if request.session.restful:
+        tdLog.debug(f"request.session.start_taosadapter: {request.session.start_taosadapter}")
+        if request.session.start_taosadapter:
             # TODO: 增加taosAdapter的配置
             adapter_config_dir = os.path.join(work_dir, "dnode1", "cfg")
             adapter_config_file = os.path.join(adapter_config_dir, "taosadapter.toml")
             taos_config_file = os.path.join(work_dir, "dnode1", "cfg", "taos.cfg")
             adapter_log_dir = os.path.join(work_dir, "dnode1", "log")
             taos_log_dir = os.path.join(work_dir, "dnode1", "log")
+            
+            adapter_config = copy.deepcopy(adapter_config_template)
+            adapter_config["taosConfigDir"] = taos_config_file
+            adapter_config["log"]["path"] = adapter_log_dir
             restful_dict = {
                 "name": "taosAdapter",
                 "fqdn": ["localhost"],
                 "spec": {
                     "version": "2.4.0.0",
                     "config_file": adapter_config_file,
-                    "adapter_config": {
-                        "logLevel": "debug",
-                        "port": 6041,
-                        "taosConfigDir": taos_config_file,
-                        "log": {"path": adapter_log_dir}
-                    },
+                    "adapter_config": adapter_config,
                     "taos_config": {
-                        "firstEP": "localhost:6030",
+                        "firstEP": f"localhost:{port_base}",
                         "logDir": taos_log_dir
                     },
-                    "taosadapterPath": os.path.join(request.session.taos_bin_path, "taosadapter")
+                    "taosadapterPath": os.path.join(request.session.taos_bin_path, taosadapter_binary)
                 }
             }
             if request.session.asan:
@@ -291,60 +323,31 @@ class BeforeTest:
             adapter["port"] = 6041
             adapter["logLevel"] = "info"
             adapter["log_path"] = adapter_log_dir
-            adapter["taos_firstEP"] = "localhost:6030"
+            adapter["taos_firstEP"] = f"localhost:{port_base}"
             adapter["taos_logDir"] = taos_log_dir
             request.session.adapter = adapter
-        if request.session.taoskeeper:
+        if request.session.set_taoskeeper:
             # TODO:增加taoskeeper配置
             taoskeeper_config_dir = os.path.join(work_dir, "dnode1", "cfg")
             taoskeeper_config_file = os.path.join(taoskeeper_config_dir, "taoskeeper.toml")
             taos_config_file = os.path.join(work_dir, "dnode1", "cfg", "taos.cfg")
             taoskeeper_log_dir = os.path.join(work_dir, "dnode1", "log")
             taos_log_dir = os.path.join(work_dir, "dnode1", "log")
+            
+            taoskeeper_config = copy.deepcopy(taoskeeper_config_template)
+            taoskeeper_config["log"]["path"] = taoskeeper_log_dir
             taoskeeper_dict = {
                 "name": "taoskeeper",
                 "fqdn": ["localhost"],
                 "spec": {
                     "version": "2.4.0.0",
                     "config_file": taoskeeper_config_file,
-                    "taoskeeper_config": {
-                        "tdengine":{
-                            "host": "localhost",
-                            "port": 6041,
-                            "username": "root",
-                            "password": "taosdata",
-                        },
-                        "port": 6043,
-                        "taosConfigDir": "/etc/taos",
-                        "log":{"path": f"{taoskeeper_log_dir}",
-                               "level": "info",
-                               "RotationInterval": "15s",
-                               "keepDays": 30,
-                               "rotationSize": "1GB",
-                               "rotationCount": 30
-                               },
-                        "metrics":{
-                            "prefix": "taos",
-                        },
-                        "metrics.database":{
-                            "name": "log",
-                        },
-                        "metrics.database.options":{
-                            "vgroups": 1,
-                            "buffer": 64,
-                            "keep": 90,
-                            "cachemodel": "both",
-                        },
-                        "enviornment":{
-                            "incgroup": "false",
-                        }
-                        
-                },
+                    "taoskeeper_config": taoskeeper_config,
                     "taos_config": {
-                        "firstEP": "localhost:6030",
+                        "firstEP": f"localhost:{port_base}",
                         "logDir": taos_log_dir
                     },
-                    "taoskeeperPath": os.path.join(request.session.taos_bin_path, "taoskeeper")
+                        "taoskeeperPath": os.path.join(request.session.taos_bin_path, taoskeeper_binary)
             }
                 
             }
@@ -389,7 +392,8 @@ class BeforeTest:
 
         # 解析settings中name=taosd的配置
         servers = []
-        request.session.restful = False
+        request.session.start_taosadapter = False
+        request.session.set_taoskeeper = False
         for setting in yaml_data.get("settings", []):
             if setting.get("name") == "taosd":
                 for dnode in setting["spec"]["dnodes"]:
@@ -408,7 +412,7 @@ class BeforeTest:
                     servers.append(server)
             if setting.get("name") == "taosAdapter":
                 # TODO: 解析taosAdapter的配置
-                request.session.restful = True
+                request.session.start_taosadapter = True
                 adapter = {}
                 adapter["host"] = setting["fqdn"][0]
                 adapter["cfg_dir"] = os.path.dirname(setting["spec"]["config_file"])
@@ -420,7 +424,7 @@ class BeforeTest:
                 adapter["taos_logDir"] = setting["spec"]["taos_config"]["logDir"]
             if setting.get("name") == "taoskeeper":
                 # TODO:解析taoskeeper的配置
-                request.session.restful = True
+                request.session.set_taoskeeper = True
                 taoskeeper = {}
                 taoskeeper["host"] = setting["fqdn"][0]
                 taoskeeper["port"] = setting["spec"]["port"]
@@ -440,35 +444,46 @@ class BeforeTest:
         request.session.password = "taosdata"
         request.session.cfg_path = servers[0]["cfg_path"]
         request.session.servers = servers
+        request.session.level = 1
+        request.session.disk = 1
         request.session.denodes_num = len(servers)
+        request.session.create_dnode_num = len(servers)
         request.session.query_policy = 1
         request.session.yaml_data = yaml_data
-        request.session.adapter = adapter
-
-        request.session.taoskepper = taoskeeper
+        if setting.get("name") == "taosAdapter":
+            request.session.adapter = adapter
+        if setting.get("name") == "taoskeeper":
+            request.session.taoskeeper = taoskeeper
 
         if servers[0]["taosd_path"] is not None:
             request.session.taos_bin_path = servers[0]["taosd_path"]
+        else:
+            request.session.taos_bin_path = self.get_taos_bin_path()
+        request.session.lib_path = os.path.join(os.path.dirname(request.session.taos_bin_path), 'lib')
 
 
     def init_dnode_cluster(self, request, dnode_nums, mnode_nums, independentMnode=True, level=1, disk=1):
         global tdDnodes, clusterDnodes, cluster
         host = socket.gethostname()
+        if sys.platform == "win32":
+            taosd_binary_name = "taosd.exe"
+        else:
+            taosd_binary_name = "taosd"
         if request.session.host == host or request.session.host == "localhost":
             master_ip = ""
         else:
             master_ip = request.session.host
         #logger.info(f"tdDnodes_pytest in init_dnode_cluster: {tdDnodes_pytest}")
         if dnode_nums > 1:
-            dnodes_list = cluster.configure_cluster(dnodeNums=dnode_nums, mnodeNums=mnode_nums, independentMnode=independentMnode)
-            #clusterDnodes.init(dnodes_list, request.session.work_dir, os.path.join(request.session.taos_bin_path, "taosd"), master_ip)
-            #clusterDnodes.setTestCluster(False)
-            #clusterDnodes.setValgrind(0)
-            #clusterDnodes.setAsan(request.session.asan)
+            dnodes_list = cluster.configure_cluster(dnodeNums=dnode_nums, mnodeNums=mnode_nums, independentMnode=independentMnode, hostname=request.session.host, level=level, disk=disk)
+            clusterDnodes.init(dnodes_list, request.session.work_dir, os.path.join(request.session.taos_bin_path, taosd_binary_name), master_ip)
+            clusterDnodes.setTestCluster(False)
+            clusterDnodes.setValgrind(0)
+            clusterDnodes.setAsan(request.session.asan)
             tdDnodes.dnodes = dnodes_list #clusterDnodes.dnodes
-            tdDnodes.init(request.session.work_dir, os.path.join(request.session.taos_bin_path, "taosd"), master_ip)
+            tdDnodes.init(request.session.work_dir, os.path.join(request.session.taos_bin_path, taosd_binary_name), master_ip)
         else:
-            tdDnodes.init(request.session.work_dir, os.path.join(request.session.taos_bin_path, "taosd"), master_ip)
+            tdDnodes.init(request.session.work_dir, os.path.join(request.session.taos_bin_path, taosd_binary_name), master_ip)
             tdDnodes.setKillValgrind(1)
             tdDnodes.setTestCluster(False)
             tdDnodes.setValgrind(0)
@@ -477,6 +492,7 @@ class BeforeTest:
         tdDnodes.sim.logDir = os.path.join(tdDnodes.sim.path,"psim","log")
         tdDnodes.sim.cfgDir = os.path.join(tdDnodes.sim.path,"psim","cfg")
         tdDnodes.sim.cfgPath = os.path.join(tdDnodes.sim.path,"psim","cfg","taos.cfg")
+        tdDnodes.sim.deploy(request.cls.updatecfgDict if hasattr(request.cls, "updatecfgDict") else {})
         tdDnodes.simDeployed = True
         tdDnodes.setLevelDisk(request.session.level, request.session.disk)
         for i in range(dnode_nums):
@@ -492,7 +508,7 @@ class BeforeTest:
             tdDnodes.dnodes[i].deployed = 1
             tdDnodes.dnodes[i].running = 1
         
-        if request.session.restful:
+        if request.session.start_taosadapter:
             tAdapter.init(request.session.work_dir, master_ip)
             tAdapter.log_dir = request.session.adapter["log_path"]
             tAdapter.cfg_dir = request.session.adapter["cfg_dir"]
@@ -502,7 +518,7 @@ class BeforeTest:
             tAdapter.running = 1
 
     # TODO: 增加taoskeeper实例化
-        if request.session.taoskeeper:
+        if request.session.set_taoskeeper:
             taoskeeper.init("", master_ip)
             taoskeeper.log_dir = request.session.taoskeeper["log_path"]
             taoskeeper.cfg_dir = request.session.taoskeeper["cfg_dir"]
@@ -514,70 +530,95 @@ class BeforeTest:
         tdCom.init(request.session.taos_bin_path, request.session.cfg_path, request.session.work_dir)
        
     def update_cfg(self, updatecfgDict):
+        # Collect client-side config separately; store for ALTER LOCAL application after connection
+        self._pending_client_cfg = dict(updatecfgDict.get("clientCfg", {}))
         for key, value in updatecfgDict.items():
+            if key == "clientCfg":
+                continue
             for dnode in self.request.session.yaml_data["settings"][0]["spec"]["dnodes"]:
                 dnode["config"][key] = value
         with open(os.path.join(self.root_dir, 'env', 'ci_default.yaml'), 'w') as file:
             yaml.dump(self.request.session.yaml_data, file)
 
+    def update_encrypt_config(self, encryptConfig):
+        for dnode in self.request.session.yaml_data["settings"][0]["spec"]["dnodes"]:
+            if "config" not in dnode:
+                dnode["config"] = {}
+            dnode["config"]["encrypt"] = encryptConfig
+        with open(os.path.join(self.root_dir, 'env', 'ci_default.yaml'), 'w') as file:
+            yaml.dump(self.request.session.yaml_data, file)
 
     def getPath(self, binary="taosd"):
         selfPath = os.path.dirname(os.path.realpath(__file__))
-
-        if ("community" in selfPath):
-            projPath = selfPath[:selfPath.find("community")]
+        if sys.platform == "win32":
+            binary_file = f"{binary}.exe"
         else:
-            projPath = selfPath[:selfPath.find("test")]
+            binary_file = binary
+
+        projPath = find_proj_path(selfPath)
 
         paths = []
         debug_path = os.path.join(projPath, "debug", "build", "bin")
         for root, dirs, files in os.walk(debug_path):
-            if (binary in files or (f"{binary}.exe") in files):
+            if ".git" in root:
+                continue
+            if binary_file in files:
                 rootRealPath = os.path.dirname(os.path.realpath(root))
                 if ("packaging" not in rootRealPath):
-                    paths.append(os.path.join(root, binary))
+                    paths.append(os.path.join(root, binary_file))
                     break
         if (len(paths) == 0):
             if sys.platform == "win32":
-                return f"C:\\TDengine\\bin\\{binary}.exe"
+                return f"C:\\TDengine\\{binary}.exe"
             elif sys.platform == "darwin":
-                if os.path.exists("/usr/local/bin/{binary}"):
+                if os.path.exists(f"/usr/local/bin/{binary}"):
                     return f"/usr/local/bin/{binary}"
                 else:
-                    testLog.error(f"taosd binary not found in /usr/local/bin/{binary}")
-                    #raise Exception(f"taosd binary not found in debug/build/bin or /usr/local/bin/{binary}")
+                    tdLog.error(f"taosd binary not found in /usr/local/bin/{binary}")
                     return None
             else:
-                testLog.debug(f"taos_bin_path: {os.path.exists('/usr/bin/{binary}')}")
+                tdLog.debug(f"taos_bin_path: {os.path.exists('/usr/bin/{binary}')}")
                 if os.path.exists(f"/usr/bin/{binary}"):
                     return f"/usr/bin/{binary}"
                 else:
-                    testLog.error(f"taosd binary not found in /usr/bin/{binary}")
+                    tdLog.error(f"taosd binary not found in /usr/bin/{binary}")
                     return None
-                        #raise Exception(f"taosd binary not found in debug/build/bin or /usr/bin/{binary}")
         return paths[0]
 
     def get_taos_bin_path(self, taos_bin_path):
-        if taos_bin_path is not None and os.path.exists(os.path.join(taos_bin_path, "taosd")):
-            return taos_bin_path
+        if taos_bin_path is not None:
+            taosd_name = "taosd.exe" if sys.platform == "win32" else "taosd"
+            if os.path.exists(os.path.join(taos_bin_path, taosd_name)):
+                return taos_bin_path
         bin_path = self.getPath()
         if bin_path is not None:
             return os.path.dirname(bin_path)
         raise Exception("taosd binary not found in TAOS_BIN_PATH")
 
-    def get_and_mkdir_workdir(self, workdir):
+    def get_and_mkdir_workdir(self, workdir, taos_bin_path=None):
         if workdir is None:
-            selfPath = os.path.dirname(os.path.realpath(__file__))
-            projPath = None
-            if ("community" in selfPath):
-                projPath = selfPath[:selfPath.find("community")]
-            elif ("TDengine" in selfPath):
-                projPath = selfPath[:selfPath.find("test")]
-            if projPath is not None:
-                workdir = os.path.join(projPath, "sim")
-            else:
-                workdir = os.path.join(selfPath, "sim")
-        testLog.debug(f"workdir: {workdir}")
+            # Try to derive workdir from taosd binary path.
+            # e.g. taos_bin_path = /root/tsdb/debug/build/bin
+            #   -> find 'debug' ancestor -> project root = /root/tsdb
+            #   -> workdir = /root/tsdb/sim
+            if taos_bin_path is not None:
+                path = os.path.realpath(taos_bin_path)
+                while path and path != os.path.dirname(path):
+                    if os.path.basename(path) == 'debug':
+                        if sys.platform == "win32":
+                            workdir = os.path.join(path, "sim")
+                        else:
+                            workdir = os.path.join(os.path.dirname(path), "sim")
+                        break
+                    path = os.path.dirname(path)
+            if workdir is None:
+                selfPath = os.path.dirname(os.path.realpath(__file__))
+                projPath = find_proj_path(selfPath)
+                if projPath:
+                    workdir = os.path.join(projPath, "sim")
+                else:
+                    workdir = os.path.join(selfPath, "sim")
+        tdLog.debug(f"workdir: {workdir}")
         #if os.path.exists(workdir):
         #    shutil.rmtree(workdir)
         os.makedirs(workdir, exist_ok=True)

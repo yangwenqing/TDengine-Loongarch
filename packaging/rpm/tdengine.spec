@@ -5,8 +5,10 @@
 %global __python /usr/bin/python3
 %global _build_id_links none
 
-Name:		tdengine
+Name:		%{product_name}
 Version:	%{_version}
+Provides:   tdengine = %{_version}
+Obsoletes:  tdengine < 3.3.7.0
 Release:	3%{?dist}
 Summary:	tdengine from taosdata
 Group:	  Application/Database
@@ -43,9 +45,12 @@ echo topdir: %{_topdir}
 echo version: %{_version}
 echo buildroot: %{buildroot}
 
-libfile="libtaos.so.%{_version}"
-nativelibfile="libtaosnative.so.%{_version}"
+libfile="libtaos.so"
+pkg_libfile="libtaos.so.%{_version}"
+nativelibfile="libtaosnative.so"
+pkg_nativelibfile="libtaosnative.so.%{_version}"
 wslibfile="libtaosws.so"
+pkg_wslibfile="libtaosws.so.%{_version}"
 
 # create install path, and cp file
 mkdir -p %{buildroot}%{homepath}/bin
@@ -96,6 +101,9 @@ cp %{_compiledir}/build/bin/taosd                   %{buildroot}%{homepath}/bin
 cp %{_compiledir}/build/bin/taosudf                 %{buildroot}%{homepath}/bin
 cp %{_compiledir}/build/bin/taosBenchmark           %{buildroot}%{homepath}/bin
 cp %{_compiledir}/build/bin/taosdump                %{buildroot}%{homepath}/bin
+cp %{_compiledir}/build/bin/taosmqtt                %{buildroot}%{homepath}/bin
+cp %{_compiledir}/build/bin/taosgen                 %{buildroot}%{homepath}/bin
+
 cp %{_compiledir}/../../enterprise/packaging/start-all.sh  %{buildroot}%{homepath}/bin
 cp %{_compiledir}/../../enterprise/packaging/stop-all.sh  %{buildroot}%{homepath}/bin
 sed -i "s/versionType=\"enterprise\"/versionType=\"community\"/g" %{buildroot}%{homepath}/bin/start-all.sh
@@ -112,9 +120,9 @@ fi
 if [ -f %{_compiledir}/build/bin/taosadapter ]; then
     cp %{_compiledir}/build/bin/taosadapter                    %{buildroot}%{homepath}/bin
 fi
-cp %{_compiledir}/build/lib/${libfile}              %{buildroot}%{homepath}/driver
-cp %{_compiledir}/build/lib/${nativelibfile}        %{buildroot}%{homepath}/driver
-[ -f %{_compiledir}/build/lib/${wslibfile} ] && cp %{_compiledir}/build/lib/${wslibfile}            %{buildroot}%{homepath}/driver ||:
+cp %{_compiledir}/build/lib/${libfile}              %{buildroot}%{homepath}/driver/${pkg_libfile}
+cp %{_compiledir}/build/lib/${nativelibfile}        %{buildroot}%{homepath}/driver/${pkg_nativelibfile}
+cp %{_compiledir}/build/lib/${wslibfile}            %{buildroot}%{homepath}/driver/${pkg_wslibfile} ||:
 cp %{_compiledir}/../include/client/taos.h          %{buildroot}%{homepath}/include
 cp %{_compiledir}/../include/common/taosdef.h       %{buildroot}%{homepath}/include
 cp %{_compiledir}/../include/util/taoserror.h       %{buildroot}%{homepath}/include
@@ -240,6 +248,8 @@ if [ $1 -eq 0 ];then
     ${csudo}rm -f ${bin_link_dir}/taoskeeper       || :
     ${csudo}rm -f ${bin_link_dir}/taosdump       || :
     ${csudo}rm -f ${bin_link_dir}/taosBenchmark       || :
+    ${csudo}rm -f ${bin_link_dir}/taosmqtt    || :
+    ${csudo}rm -f ${bin_link_dir}/taosgen    || :
     ${csudo}rm -f ${cfg_link_dir}/*          || :
     ${csudo}rm -f ${inc_link_dir}/taos.h     || :
     ${csudo}rm -f ${inc_link_dir}/taosdef.h     || :

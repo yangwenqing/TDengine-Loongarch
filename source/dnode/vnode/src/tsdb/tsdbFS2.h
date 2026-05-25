@@ -28,6 +28,9 @@ typedef enum {
   TSDB_FEDIT_MERGE,
   TSDB_FEDIT_COMPACT,
   TSDB_FEDIT_RETENTION,
+  TSDB_FEDIT_SSMIGRATE,
+  TSDB_FEDIT_ROLLUP,
+  TSDB_FEDIT_FORCE_REPAIR,
 } EFEditT;
 
 typedef enum {
@@ -73,6 +76,7 @@ struct STFileSystem {
   STsdb        *tsdb;
   tsem_t        canEdit;
   int32_t       fsstate;
+  int32_t       rollupLevel;
   int64_t       neid;
   EFEditT       etype;
   TFileSetArray fSetArr[1];

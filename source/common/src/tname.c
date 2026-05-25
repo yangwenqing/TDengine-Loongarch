@@ -35,7 +35,7 @@ int32_t tNameExtractFullName(const SName* name, char* dst) {
     return TSDB_CODE_INVALID_PARA;
   }
 
-  int32_t len = tsnprintf(dst, TSDB_DB_FNAME_LEN, "%d.%s", name->acctId, name->dbname);
+  int32_t len = snprintf(dst, TSDB_DB_FNAME_LEN, "%d.%s", name->acctId, name->dbname);
 
   size_t tnameLen = strlen(name->tname);
   if (tnameLen > 0) {
@@ -50,7 +50,7 @@ int32_t tNameExtractFullName(const SName* name, char* dst) {
 
 int32_t tNameLen(const SName* name) {
   char    tmp[12] = {0};
-  int32_t len = sprintf(tmp, "%d", name->acctId);
+  int32_t len = snprintf(tmp, sizeof(tmp), "%d", name->acctId);
   int32_t len1 = (int32_t)strlen(name->dbname);
   int32_t len2 = (int32_t)strlen(name->tname);
 
@@ -271,7 +271,7 @@ int32_t buildChildTableName(RandTableName* rName) {
 
   rName->ctbShortName[0] = 't';
   rName->ctbShortName[1] = '_';
-  taosByteArrayToHexStr(context.digest, 16, rName->ctbShortName + 2);
+  (void)taosByteArrayToHexStr((char*)context.digest, 16, rName->ctbShortName + 2);
   rName->ctbShortName[34] = 0;
 
   return TSDB_CODE_SUCCESS;

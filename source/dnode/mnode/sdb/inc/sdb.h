@@ -58,6 +58,7 @@ extern "C" {
 #define SDB_GET_INT64(pData, dataPos, val, pos) SDB_GET_VAL(pData, dataPos, val, pos, sdbGetRawInt64, int64_t)
 #define SDB_GET_FLOAT(pData, dataPos, val, pos) SDB_GET_VAL(pData, dataPos, val, pos, sdbGetRawFloat, float)
 #define SDB_GET_INT32(pData, dataPos, val, pos) SDB_GET_VAL(pData, dataPos, val, pos, sdbGetRawInt32, int32_t)
+#define SDB_GET_UINT32(pData, dataPos, val, pos) SDB_GET_VAL(pData, dataPos, val, pos, sdbGetRawUInt32, uint32_t)
 #define SDB_GET_INT16(pData, dataPos, val, pos) SDB_GET_VAL(pData, dataPos, val, pos, sdbGetRawInt16, int16_t)
 #define SDB_GET_INT8(pData, dataPos, val, pos)  SDB_GET_VAL(pData, dataPos, val, pos, sdbGetRawInt8, int8_t)
 #define SDB_GET_UINT8(pData, dataPos, val, pos) SDB_GET_VAL(pData, dataPos, val, pos, sdbGetRawUInt8, uint8_t)
@@ -80,6 +81,7 @@ extern "C" {
 
 #define SDB_SET_INT64(pRaw, dataPos, val, pos) SDB_SET_VAL(pRaw, dataPos, val, pos, sdbSetRawInt64, int64_t)
 #define SDB_SET_INT32(pRaw, dataPos, val, pos) SDB_SET_VAL(pRaw, dataPos, val, pos, sdbSetRawInt32, int32_t)
+#define SDB_SET_UINT32(pRaw, dataPos, val, pos) SDB_SET_VAL(pRaw, dataPos, val, pos, sdbSetRawUInt32, uint32_t)
 #define SDB_SET_INT16(pRaw, dataPos, val, pos) SDB_SET_VAL(pRaw, dataPos, val, pos, sdbSetRawInt16, int16_t)
 #define SDB_SET_INT8(pRaw, dataPos, val, pos)  SDB_SET_VAL(pRaw, dataPos, val, pos, sdbSetRawInt8, int8_t)
 #define SDB_SET_UINT8(pRaw, dataPos, val, pos) SDB_SET_VAL(pRaw, dataPos, val, pos, sdbSetRawUInt8, uint8_t)
@@ -122,6 +124,8 @@ typedef int32_t (*SdbValidateFp)(SMnode *pMnode, void *pTrans, SSdbRaw *pRaw);
 typedef SSdbRow *(*SdbDecodeFp)(SSdbRaw *pRaw);
 typedef SSdbRaw *(*SdbEncodeFp)(void *pObj);
 typedef bool (*sdbTraverseFp)(SMnode *pMnode, void *pObj, void *p1, void *p2, void *p3);
+typedef int32_t (*SdbUpgradeFp)(SMnode *pMnode, int32_t version);
+typedef bool (*SdbIsUpgradedFp)(SMnode *pMnode);
 
 typedef enum {
   SDB_KEY_BINARY = 1,
@@ -144,6 +148,7 @@ typedef enum {
   SDB_MNODE = 2,
   SDB_QNODE = 3,
   SDB_SNODE = 4,
+  SDB_BNODE = 5,
   SDB_DNODE = 6,
   SDB_USER = 7,
   SDB_AUTH = 8,
@@ -168,7 +173,26 @@ typedef enum {
   SDB_ARBGROUP = 27,
   SDB_ANODE = 28,
   SDB_CFG = 29,
-  SDB_MAX = 30
+  SDB_MOUNT = 30,
+  SDB_MOUNT_LOG = 31,
+  SDB_SSMIGRATE = 32,
+  SDB_SCAN = 33,
+  SDB_SCAN_DETAIL = 34,
+  SDB_RSMA = 35,
+  SDB_RETENTION = 36,
+  SDB_RETENTION_DETAIL = 37,
+  SDB_INSTANCE = 38,
+  SDB_ENCRYPT_ALGORITHMS = 39,
+  SDB_TOKEN = 40,
+  SDB_ROLE = 41,
+  SDB_XNODE = 42,
+  SDB_XNODE_TASK = 43,
+  SDB_XNODE_AGENT = 44,
+  SDB_XNODE_JOB = 45,
+  SDB_XNODE_USER_PASS = 46,
+  SDB_SECURITY_POLICY = 47,
+  SDB_GRANT_CLS = 48,
+  SDB_MAX = 49
 } ESdbType;
 
 typedef struct SSdbRaw {
@@ -193,6 +217,9 @@ typedef struct SSdb {
   int64_t            sync;
   char              *currDir;
   char              *tmpDir;
+  char               mnodePath[PATH_MAX];  // Path to mnode directory for persisting mnode.json
+  int32_t          (*persistEncryptedFlagFp)(void *pMnode);  // Callback to persist encrypted flag
+  void              *pMnodeForCallback;  // Pointer to SMnode for callback
   int64_t            commitIndex;
   int64_t            commitTerm;
   int64_t            commitConfig;
@@ -212,7 +239,10 @@ typedef struct SSdb {
   SdbEncodeFp        encodeFps[SDB_MAX];
   SdbDecodeFp        decodeFps[SDB_MAX];
   SdbValidateFp      validateFps[SDB_MAX];
+  SdbUpgradeFp       upgradeFps[SDB_MAX];
+  SdbIsUpgradedFp    isUpgradedFps[SDB_MAX];
   TdThreadMutex      filelock;
+  bool               encrypted;
 } SSdb;
 
 typedef struct SSdbIter {
@@ -232,6 +262,8 @@ typedef struct {
   SdbUpdateFp        updateFp;
   SdbDeleteFp        deleteFp;
   SdbValidateFp      validateFp;
+  SdbUpgradeFp       upgradeFp;
+  SdbIsUpgradedFp    isUpgradedFp;
 } SSdbTable;
 
 typedef struct SSdbOpt {
@@ -272,7 +304,8 @@ int32_t sdbSetTable(SSdb *pSdb, SSdbTable table);
  * @return int32_t 0 for success, -1 for failure.
  */
 int32_t sdbDeploy(SSdb *pSdb);
-
+int32_t sdbUpgrade(SSdb *pSdb, int32_t version);
+bool    sdbIsUpgraded(SSdb *pSdb);
 /**
  * @brief prepare the initial rows of sdb.
  *
@@ -297,7 +330,7 @@ int32_t sdbReadFile(SSdb *pSdb);
  */
 int32_t sdbWriteFile(SSdb *pSdb, int32_t delta);
 
-int32_t sdbWriteFileForDump(SSdb *pSdb);
+int32_t sdbWriteFileForDump(SSdb *pSdb, int32_t skip_type);
 /**
  * @brief Parse and write raw data to sdb, then free the pRaw object
  *
@@ -426,6 +459,7 @@ int32_t  sdbSetRawUInt8(SSdbRaw *pRaw, int32_t dataPos, uint8_t val);
 int32_t  sdbSetRawBool(SSdbRaw *pRaw, int32_t dataPos, bool val);
 int32_t  sdbSetRawInt16(SSdbRaw *pRaw, int32_t dataPos, int16_t val);
 int32_t  sdbSetRawInt32(SSdbRaw *pRaw, int32_t dataPos, int32_t val);
+int32_t  sdbSetRawUInt32(SSdbRaw *pRaw, int32_t dataPos, uint32_t val);
 int32_t  sdbSetRawInt64(SSdbRaw *pRaw, int32_t dataPos, int64_t val);
 int32_t  sdbSetRawFloat(SSdbRaw *pRaw, int32_t dataPos, float val);
 int32_t  sdbSetRawBinary(SSdbRaw *pRaw, int32_t dataPos, const char *pVal, int32_t valLen);
@@ -436,6 +470,7 @@ int32_t  sdbGetRawUInt8(SSdbRaw *pRaw, int32_t dataPos, uint8_t *val);
 int32_t  sdbGetRawBool(SSdbRaw *pRaw, int32_t dataPos, bool *val);
 int32_t  sdbGetRawInt16(SSdbRaw *pRaw, int32_t dataPos, int16_t *val);
 int32_t  sdbGetRawInt32(SSdbRaw *pRaw, int32_t dataPos, int32_t *val);
+int32_t  sdbGetRawUInt32(SSdbRaw *pRaw, int32_t dataPos, uint32_t *val);
 int32_t  sdbGetRawInt64(SSdbRaw *pRaw, int32_t dataPos, int64_t *val);
 int32_t  sdbGetRawFloat(SSdbRaw *pRaw, int32_t dataPos, float *val);
 int32_t  sdbGetRawBinary(SSdbRaw *pRaw, int32_t dataPos, char *pVal, int32_t valLen);
@@ -458,6 +493,7 @@ const char *sdbTableName(ESdbType type);
 const char *sdbStatusName(ESdbStatus status);
 void        sdbPrintOper(SSdb *pSdb, SSdbRow *pRow, const char *oper);
 int32_t     sdbGetIdFromRaw(SSdb *pSdb, SSdbRaw *pRaw);
+bool        sdbCheckExists(SSdb *pSdb, ESdbType type, const void *pKey);
 
 void sdbWriteLock(SSdb *pSdb, int32_t type);
 void sdbReadLock(SSdb *pSdb, int32_t type);

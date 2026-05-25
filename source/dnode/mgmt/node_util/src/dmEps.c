@@ -15,6 +15,7 @@
 
 #define _DEFAULT_SOURCE
 #include "dmUtil.h"
+#include "tencrypt.h"
 #include "tjson.h"
 #include "tmisce.h"
 
@@ -81,7 +82,7 @@ static int32_t dmDecodeEps(SJson *pJson, SDnodeData *pData) {
     SDnodeEp dnodeEp = {0};
     tjsonGetInt32ValueFromDouble(dnode, "id", dnodeEp.id, code);
     if (code < 0) return -1;
-    code = tjsonGetStringValue(dnode, "fqdn", dnodeEp.ep.fqdn);
+    code = tjsonGetStringValue1(dnode, "fqdn", dnodeEp.ep.fqdn, sizeof(dnodeEp.ep.fqdn));
     if (code < 0) return -1;
     tjsonGetUInt16ValueFromDouble(dnode, "port", dnodeEp.ep.port, code);
     if (code < 0) return -1;
@@ -115,7 +116,6 @@ void dmSplitStr(char **arr, char *str, const char *del) {
 
 int32_t dmReadEps(SDnodeData *pData) {
   int32_t   code = -1;
-  TdFilePtr pFile = NULL;
   char     *content = NULL;
   SJson    *pJson = NULL;
   char      file[PATH_MAX] = {0};
@@ -205,33 +205,13 @@ int32_t dmReadEps(SDnodeData *pData) {
     goto _OVER;
   }
 
-  pFile = taosOpenFile(file, TD_FILE_READ);
-  if (pFile == NULL) {
-    code = terrno;
-    dError("failed to open dnode file:%s since %s", file, terrstr());
-    goto _OVER;
-  }
-
-  int64_t size = 0;
-  code = taosFStatFile(pFile, &size, NULL);
+  // Use taosReadCfgFile for automatic decryption support (returns null-terminated string)
+  int32_t contentLen = 0;
+  code = taosReadCfgFile(file, &content, &contentLen);
   if (code != 0) {
-    dError("failed to fstat dnode file:%s since %s", file, terrstr());
-    goto _OVER;
-  }
-
-  content = taosMemoryMalloc(size + 1);
-  if (content == NULL) {
-    code = terrno;
-    goto _OVER;
-  }
-
-  if (taosReadFile(pFile, content, size) != size) {
-    code = terrno;
     dError("failed to read dnode file:%s since %s", file, terrstr());
     goto _OVER;
   }
-
-  content[size] = '\0';
 
   pJson = tjsonParse(content);
   if (pJson == NULL) {
@@ -249,7 +229,6 @@ int32_t dmReadEps(SDnodeData *pData) {
 _OVER:
   if (content != NULL) taosMemoryFree(content);
   if (pJson != NULL) cJSON_Delete(pJson);
-  if (pFile != NULL) taosCloseFile(&pFile);
 
   if (code != 0) {
     dError("failed to read dnode file:%s since %s", file, terrstr());
@@ -317,10 +296,7 @@ int32_t dmWriteEps(SDnodeData *pData) {
   int32_t   code = 0;
   char     *buffer = NULL;
   SJson    *pJson = NULL;
-  TdFilePtr pFile = NULL;
-  char      file[PATH_MAX] = {0};
   char      realfile[PATH_MAX] = {0};
-  snprintf(file, sizeof(file), "%s%sdnode%sdnode.json.bak", tsDataDir, TD_DIRSEP, TD_DIRSEP);
   snprintf(realfile, sizeof(realfile), "%s%sdnode%sdnode.json", tsDataDir, TD_DIRSEP, TD_DIRSEP);
 
   // if ((code == dmInitDndInfo(pData)) != 0) goto _OVER;
@@ -338,15 +314,13 @@ int32_t dmWriteEps(SDnodeData *pData) {
     TAOS_CHECK_GOTO(terrno, NULL, _OVER);
   }
 
-  pFile = taosOpenFile(file, TD_FILE_CREATE | TD_FILE_WRITE | TD_FILE_TRUNC | TD_FILE_WRITE_THROUGH);
-  if (pFile == NULL) TAOS_CHECK_GOTO(terrno, NULL, _OVER);
-
   int32_t len = strlen(buffer);
-  if (taosWriteFile(pFile, buffer, len) <= 0) TAOS_CHECK_GOTO(terrno, NULL, _OVER);
-  if (taosFsyncFile(pFile) < 0) TAOS_CHECK_GOTO(terrno, NULL, _OVER);
 
-  (void)taosCloseFile(&pFile);
-  TAOS_CHECK_GOTO(taosRenameFile(file, realfile), NULL, _OVER);
+  // Use encrypted write if tsCfgKey is enabled
+  code = taosWriteCfgFile(realfile, buffer, len);
+  if (code != 0) {
+    TAOS_CHECK_GOTO(code, NULL, _OVER);
+  }
 
   pData->updateTime = taosGetTimestampMs();
   dInfo("succeed to write dnode file:%s, num:%d ver:%" PRId64, realfile, (int32_t)taosArrayGetSize(pData->dnodeEps),
@@ -355,7 +329,6 @@ int32_t dmWriteEps(SDnodeData *pData) {
 _OVER:
   if (pJson != NULL) tjsonDelete(pJson);
   if (buffer != NULL) taosMemoryFree(buffer);
-  if (pFile != NULL) (void)taosCloseFile(&pFile);
 
   if (code != 0) {
     dError("failed to write dnode file:%s since %s, dnodeVer:%" PRId64, realfile, tstrerror(code), pData->dnodeVer);
@@ -453,7 +426,8 @@ static bool dmIsEpChanged(SDnodeData *pData, int32_t dnodeId, const char *ep) {
   return changed;
 }
 
-void dmGetMnodeEpSet(SDnodeData *pData, SEpSet *pEpSet) {
+void dmGetMnodeEpSet(void* data, SEpSet *pEpSet) {
+  SDnodeData *pData = (SDnodeData*)data;
   (void)taosThreadRwlockRdlock(&pData->lock);
   *pEpSet = pData->mnodeEps;
   (void)taosThreadRwlockUnlock(&pData->lock);
@@ -461,12 +435,12 @@ void dmGetMnodeEpSet(SDnodeData *pData, SEpSet *pEpSet) {
 
 void dmEpSetToStr(char *buf, int32_t len, SEpSet *epSet) {
   int32_t n = 0;
-  n += tsnprintf(buf + n, len - n, "%s", "{");
+  n += snprintf(buf + n, len - n, "%s", "{");
   for (int i = 0; i < epSet->numOfEps; i++) {
-    n += tsnprintf(buf + n, len - n, "%s:%d%s", epSet->eps[i].fqdn, epSet->eps[i].port,
+    n += snprintf(buf + n, len - n, "%s:%d%s", epSet->eps[i].fqdn, epSet->eps[i].port,
                   (i + 1 < epSet->numOfEps ? ", " : ""));
   }
-  n += tsnprintf(buf + n, len - n, "%s", "}");
+  n += snprintf(buf + n, len - n, "%s", "}");
 }
 
 static FORCE_INLINE void dmSwapEps(SEp *epLhs, SEp *epRhs) {
@@ -579,11 +553,11 @@ static int32_t dmDecodeEpPairs(SJson *pJson, SDnodeData *pData) {
     SDnodeEpPair pair = {0};
     tjsonGetInt32ValueFromDouble(dnode, "id", pair.id, code);
     if (code < 0) return TSDB_CODE_INVALID_CFG_VALUE;
-    code = tjsonGetStringValue(dnode, "fqdn", pair.oldFqdn);
+    code = tjsonGetStringValue1(dnode, "fqdn", pair.oldFqdn, sizeof(pair.oldFqdn));
     if (code < 0) return TSDB_CODE_INVALID_CFG_VALUE;
     tjsonGetUInt16ValueFromDouble(dnode, "port", pair.oldPort, code);
     if (code < 0) return TSDB_CODE_INVALID_CFG_VALUE;
-    code = tjsonGetStringValue(dnode, "new_fqdn", pair.newFqdn);
+    code = tjsonGetStringValue1(dnode, "new_fqdn", pair.newFqdn, sizeof(pair.newFqdn));
     if (code < 0) return TSDB_CODE_INVALID_CFG_VALUE;
     tjsonGetUInt16ValueFromDouble(dnode, "new_port", pair.newPort, code);
     if (code < 0) return TSDB_CODE_INVALID_CFG_VALUE;
@@ -607,8 +581,8 @@ void dmRemoveDnodePairs(SDnodeData *pData) {
 
 static int32_t dmReadDnodePairs(SDnodeData *pData) {
   int32_t   code = -1;
-  TdFilePtr pFile = NULL;
   char     *content = NULL;
+  int32_t   contentLen = 0;
   SJson    *pJson = NULL;
   char      file[PATH_MAX] = {0};
   snprintf(file, sizeof(file), "%s%sdnode%sep.json", tsDataDir, TD_DIRSEP, TD_DIRSEP);
@@ -620,33 +594,12 @@ static int32_t dmReadDnodePairs(SDnodeData *pData) {
     goto _OVER;
   }
 
-  pFile = taosOpenFile(file, TD_FILE_READ);
-  if (pFile == NULL) {
-    code = terrno;
-    dError("failed to open dnode file:%s since %s", file, terrstr());
-    goto _OVER;
-  }
-
-  int64_t size = 0;
-  code = taosFStatFile(pFile, &size, NULL);
+  // Use taosReadCfgFile for automatic decryption support (returns null-terminated string)
+  code = taosReadCfgFile(file, &content, &contentLen);
   if (code != 0) {
-    dError("failed to fstat dnode file:%s since %s", file, terrstr());
-    goto _OVER;
-  }
-
-  content = taosMemoryMalloc(size + 1);
-  if (content == NULL) {
-    code = terrno;
-    goto _OVER;
-  }
-
-  if (taosReadFile(pFile, content, size) != size) {
-    terrno = terrno;
     dError("failed to read dnode file:%s since %s", file, terrstr());
     goto _OVER;
   }
-
-  content[size] = '\0';
 
   pJson = tjsonParse(content);
   if (pJson == NULL) {
@@ -675,7 +628,6 @@ static int32_t dmReadDnodePairs(SDnodeData *pData) {
 _OVER:
   if (content != NULL) taosMemoryFree(content);
   if (pJson != NULL) cJSON_Delete(pJson);
-  if (pFile != NULL) taosCloseFile(&pFile);
 
   if (code != 0) {
     dError("failed to read dnode file:%s since %s", file, tstrerror(code));

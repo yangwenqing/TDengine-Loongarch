@@ -117,6 +117,14 @@ add_test(
     COMMAND regexTest
 )
 
+add_executable(lrucacheTest "lrucacheTest.cpp")
+DEP_ext_gtest(lrucacheTest)
+target_link_libraries(lrucacheTest PRIVATE os util)
+add_test(
+    NAME lrucacheTest
+    COMMAND lrucacheTest
+)
+
 add_executable(logTest "log.cpp")
 DEP_ext_gtest(logTest)
 target_link_libraries(logTest PRIVATE os util common)
@@ -137,8 +145,24 @@ add_test(
     COMMAND decompressTest
 )
 
+add_executable(objpoolTest "objpoolTest.cpp")
+DEP_ext_gtest(objpoolTest)
+target_link_libraries(objpoolTest PRIVATE os util common)
+add_test(
+    NAME objpoolTest
+    COMMAND objpoolTest
+)
 
-if(${TD_LINUX})
+# timerTest
+add_executable(timerTest "timerTest.cpp")
+DEP_ext_gtest(timerTest)
+target_link_libraries(timerTest PRIVATE os util)
+add_test(
+    NAME timerTest
+    COMMAND timerTest
+)
+
+if(TD_LINUX)
     add_executable(utilTests utilTests.cpp stringTest.cpp)
     DEP_ext_gtest(utilTests)
     target_link_libraries(utilTests PRIVATE os util common)
@@ -170,5 +194,14 @@ if(${TD_LINUX})
     add_test(
         NAME memPoolTest
         COMMAND memPoolTest
+    )
+
+    # queryAutoQWorkerTest
+    add_executable(queryAutoQWorkerTest "queryAutoQWorkerTest.cpp")
+    DEP_ext_gtest(queryAutoQWorkerTest)
+    target_link_libraries(queryAutoQWorkerTest PRIVATE os util common)
+    add_test(
+        NAME queryAutoQWorkerTest
+        COMMAND queryAutoQWorkerTest
     )
 endif()

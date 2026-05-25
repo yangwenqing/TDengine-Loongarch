@@ -1,12 +1,7 @@
 ---
 sidebar_label: Kafka Connect
 title: Kafka Connect
-slug: /third-party-tools/data-collection/kafka-connect
 ---
-
-import Image from '@theme/IdealImage';
-import imgKafkaConnect from '../../assets/kafka-connect-01.png';
-import imgKafkaIntegration from '../../assets/kafka-connect-02.png';
 
 The TDengine Kafka Connector includes two plugins: TDengine Source Connector and TDengine Sink Connector. Users only need to provide a simple configuration file to synchronize data from a specified topic in Kafka to TDengine, or synchronize data from a specified database in TDengine to Kafka, either in batches or in real-time.
 
@@ -14,17 +9,11 @@ The TDengine Kafka Connector includes two plugins: TDengine Source Connector and
 
 Kafka Connect is a component of [Apache Kafka](https://kafka.apache.org/) that facilitates easy connections to Kafka from other systems, such as databases, cloud services, and file systems. Data can flow from these systems to Kafka and from Kafka to these systems through Kafka Connect. Plugins that read data from other systems are called Source Connectors, and plugins that write data to other systems are called Sink Connectors. Neither Source Connectors nor Sink Connectors connect directly to Kafka Brokers; instead, Source Connectors pass data to Kafka Connect, and Sink Connectors receive data from Kafka Connect.
 
-<figure>
-<Image img={imgKafkaConnect} alt="Kafka Connect structure"/>
-<figcaption>Figure 1. Kafka Connect structure</figcaption>
-</figure>
+![Kafka Connect architecture](../../assets/kafka-connect-01.png)
 
 The TDengine Source Connector is used to read data in real-time from TDengine and send it to Kafka Connect. The TDengine Sink Connector receives data from Kafka Connect and writes it to TDengine.
 
-<figure>
-<Image img={imgKafkaIntegration} alt="Streaming integration with Kafka Connect"/>
-<figcaption>Figure 2. Streaming integration with Kafka Connect</figcaption>
-</figure>
+![Streaming integration with Kafka Connect](../../assets/kafka-connect-02.png)
 
 ## Prerequisites
 
@@ -33,21 +22,22 @@ Prerequisites for running the examples in this tutorial.
 1. Linux operating system
 2. Java 8 and Maven installed
 3. Git, curl, vi installed
-4. TDengine installed and running. If not yet installed, refer to [Installation and Uninstallation](../../../get-started/)
+4. TDengine installed and running. If not yet installed, refer to [Installation and Uninstallation](../../04-get-started/index.md)
 
 ## Installing Kafka
 
 - Execute in any directory:
 
     ```shell
-    curl -O https://archive.apache.org/dist/kafka/3.4.0/kafka_2.13-3.4.0.tgz
-    tar xzf kafka_2.13-3.4.0.tgz -C /opt/
-    ln -s /opt/kafka_2.13-3.4.0 /opt/kafka
+    KAFKA_PKG="kafka_2.13-3.4.0"
+    curl -O "https://archive.apache.org/dist/kafka/3.4.0/${KAFKA_PKG}.tgz"
+    tar xzf "${KAFKA_PKG}.tgz" -C /opt/
+    ln -s "/opt/${KAFKA_PKG}" /opt/kafka
     ```
 
 - Then, add the `$KAFKA_HOME/bin` directory to PATH.
 
-    ```title=".profile"
+    ```shell title=".profile"
     export KAFKA_HOME=/opt/kafka
     export PATH=$PATH:$KAFKA_HOME/bin
     ```
@@ -103,7 +93,7 @@ If all components have started successfully, the following output will be displa
 
 The TDengine Sink Connector is used to synchronize data from a specified topic to TDengine. Users do not need to create the database and supertables in advance. You can manually specify the name of the target database (see configuration parameter `connection.database`), or generate it according to certain rules (see configuration parameter `connection.database.prefix`).
 
-The TDengine Sink Connector internally uses TDengine's [schemaless write interface](../../../developer-guide/schemaless-ingestion/) to write data to TDengine, currently supporting three data formats: InfluxDB Line Protocol format, OpenTSDB Telnet Protocol format, and OpenTSDB JSON Protocol format.
+The TDengine Sink Connector internally uses TDengine's [schemaless write interface](../../07-develop/04-schemaless.md) to write data to TDengine, currently supporting three data formats: InfluxDB Line Protocol format, OpenTSDB Telnet Protocol format, and OpenTSDB JSON Protocol format.
 
 The following example synchronizes data from the topic `meters` to the target database `power`. The data format is InfluxDB Line Protocol format.
 
@@ -343,6 +333,7 @@ If you find that the performance is not up to expectations during the process of
 
 1. Open the KAFKA_HOME/config/producer.properties configuration file.
 2. Parameter description and configuration suggestions are as follows:
+
     | **Parameter**         | **Description**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | **Suggested Setting** |
     | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------- |
     | producer.type         | This parameter is used to set the message sending mode, the default value is `sync` which means synchronous sending, `async` means asynchronous sending. Using asynchronous sending can improve the throughput of message sending.                                                                                                                                                                                                                                                                                                                                                                                       | async                 |

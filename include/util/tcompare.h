@@ -36,7 +36,7 @@ extern "C" {
 #define FLT_GREATEREQUAL(_x, _y) (FLT_EQUAL((_x), (_y)) || ((_x) > (_y)))
 #define FLT_LESSEQUAL(_x, _y)    (FLT_EQUAL((_x), (_y)) || ((_x) < (_y)))
 
-#define DBL_EQUAL(_x, _y)        fabs((_x) - (_y)) <= (FLT_COMPAR_TOL_FACTOR * DBL_EPSILON)
+#define DBL_EQUAL(_x, _y)        (fabs((_x) - (_y)) <= (FLT_COMPAR_TOL_FACTOR * DBL_EPSILON))
 #define DBL_GREATER(_x, _y)      (!DBL_EQUAL((_x), (_y)) && ((_x) > (_y)))
 #define DBL_LESS(_x, _y)         (!DBL_EQUAL((_x), (_y)) && ((_x) < (_y)))
 #define DBL_GREATEREQUAL(_x, _y) (DBL_EQUAL((_x), (_y)) || ((_x) > (_y)))
@@ -56,6 +56,7 @@ void    DestroyRegexCache();
 int32_t rawStrPatternMatch(const char *pattern, const char *str);
 int32_t patternMatch(const char *pattern, size_t psize, const char *str, size_t ssize, const SPatternCompareInfo *pInfo);
 int32_t checkRegexPattern(const char *pPattern);
+int32_t threadGetRegComp(regex_t **regex, const char *pPattern);
 void    DestoryThreadLocalRegComp();
 
 int32_t wcsPatternMatch(const TdUcs4 *pattern, size_t psize, const TdUcs4 *str, size_t ssize, const SPatternCompareInfo *pInfo);

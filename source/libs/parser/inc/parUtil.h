@@ -26,12 +26,12 @@ extern "C" {
 #include "parToken.h"
 #include "query.h"
 
-#define parserFatal(param, ...) qFatal("parser " param, ##__VA_ARGS__)
-#define parserError(param, ...) qError("parser " param, ##__VA_ARGS__)
-#define parserWarn(param, ...)  qWarn ("parser " param, ##__VA_ARGS__)
-#define parserInfo(param, ...)  qInfo ("parser " param, ##__VA_ARGS__)
-#define parserDebug(param, ...) qDebug("parser " param, ##__VA_ARGS__)
-#define parserTrace(param, ...) qTrace("parser " param, ##__VA_ARGS__)
+#define parserFatal(...) qFatal("parser " __VA_ARGS__)
+#define parserError(...) qError("parser " __VA_ARGS__)
+#define parserWarn(...)  qWarn ("parser " __VA_ARGS__)
+#define parserInfo(...)  qInfo ("parser " __VA_ARGS__)
+#define parserDebug(...) qDebug("parser " __VA_ARGS__)
+#define parserTrace(...) qTrace("parser " __VA_ARGS__)
 
 #define ROWTS_PSEUDO_COLUMN_NAME "_rowts"
 #define C0_PSEUDO_COLUMN_NAME    "_c0"
@@ -68,11 +68,11 @@ extern "C" {
     token = tStrGetToken(pSql, &index, false, NULL); \
   } while (0)
 
-#define NEXT_VALID_TOKEN(pSql, token)           \
-  do {                                          \
-    (token).n = tGetToken(pSql, &(token).type); \
-    (token).z = (char*)pSql;                    \
-    pSql += (token).n;                          \
+#define NEXT_VALID_TOKEN(pSql, token)                 \
+  do {                                                \
+    (token).n = tGetToken(pSql, &(token).type, NULL); \
+    (token).z = (char*)pSql;                          \
+    pSql += (token).n;                                \
   } while (TK_NK_SPACE == (token).type)
 
 typedef struct SMsgBuf {
@@ -99,26 +99,17 @@ typedef struct SInsertTablesMetaReq {
   SArray* pTableVgroupReq;  // element is SName
 } SInsertTablesMetaReq;
 
-typedef struct SParseMetaCache {
-  SHashObj* pTableMeta;    // key is tbFName, element is STableMeta*
-  SHashObj* pDbVgroup;     // key is dbFName, element is SArray<SVgroupInfo>*
-  SHashObj* pTableVgroup;  // key is tbFName, element is SVgroupInfo*
-  SHashObj* pDbCfg;        // key is tbFName, element is SDbCfgInfo*
-  SHashObj* pDbInfo;       // key is tbFName, element is SDbInfo*
-  SHashObj* pUserAuth;     // key is SUserAuthInfo serialized string, element is bool indicating whether or not to pass
-  SHashObj* pUdf;          // key is funcName, element is SFuncInfo*
-  SHashObj* pTableIndex;   // key is tbFName, element is SArray<STableIndexInfo>*
-  SHashObj* pTableCfg;     // key is tbFName, element is STableCfg*
-  SHashObj* pViews;        // key is viewFName, element is SViewMeta*
-  SHashObj* pTableTSMAs;   // key is tbFName, elements are SArray<STableTSMAInfo*>
-  SHashObj* pTSMAs;        // key is tsmaFName, elements are STableTSMAInfo*
-  SHashObj* pTableName;    // key is tbFUid, elements is STableMeta*(append with tbName)
-  SArray*   pVSubTables;   // element is SVSubTablesRsp
-  SArray*   pVStbRefDbs;   // element is pVStbRefDbs
-  SArray*   pDnodes;       // element is SDNodeAddr
-  bool      dnodeRequired;
-  bool      forceFetchViewMeta;
-} SParseMetaCache;
+typedef struct SParseStreamInfo {
+  int64_t          placeHolderBitmap;
+  bool             calcClause;
+  bool             triggerClause;
+  bool             outTableClause;
+  bool             extLeftEq; // used for external window, true means include left border
+  bool             extRightEq; // used for external window, true means include right border
+  SNode*           triggerTbl;
+  SNodeList*       triggerPartitionList;
+  SHashObj*        calcDbs;
+} SParseStreamInfo;
 
 int32_t generateSyntaxErrMsg(SMsgBuf* pBuf, int32_t errCode, ...);
 int32_t generateSyntaxErrMsgExt(SMsgBuf* pBuf, int32_t errCode, const char* pFormat, ...);
@@ -154,17 +145,16 @@ int32_t reserveTableVgroupInCache(int32_t acctId, const char* pDb, const char* p
 int32_t reserveTableVgroupInCacheExt(const SName* pName, SParseMetaCache* pMetaCache);
 int32_t reserveDbVgVersionInCache(int32_t acctId, const char* pDb, SParseMetaCache* pMetaCache);
 int32_t reserveDbCfgInCache(int32_t acctId, const char* pDb, SParseMetaCache* pMetaCache);
-int32_t reserveUserAuthInCache(int32_t acctId, const char* pUser, const char* pDb, const char* pTable, AUTH_TYPE type,
-                               SParseMetaCache* pMetaCache);
-int32_t reserveViewUserAuthInCache(int32_t acctId, const char* pUser, const char* pDb, const char* pTable, AUTH_TYPE type,
-                              SParseMetaCache* pMetaCache);
+int32_t reserveUserAuthInCache(int32_t acctId, const char* pUser, const char* pDb, const char* pTable,
+                               EPrivType privType, EPrivObjType objType, SParseMetaCache* pMetaCache);
+int32_t reserveViewUserAuthInCache(int32_t acctId, const char* pUser, const char* pDb, const char* pTable,
+                                   EPrivType privType, EPrivObjType objType, SParseMetaCache* pMetaCache);
 int32_t reserveUdfInCache(const char* pFunc, SParseMetaCache* pMetaCache);
 int32_t reserveTableIndexInCache(int32_t acctId, const char* pDb, const char* pTable, SParseMetaCache* pMetaCache);
 int32_t reserveTableCfgInCache(int32_t acctId, const char* pDb, const char* pTable, SParseMetaCache* pMetaCache);
 int32_t reserveDnodeRequiredInCache(SParseMetaCache* pMetaCache);
 int32_t reserveTableTSMAInfoInCache(int32_t acctId, const char* pDb, const char* pTable, SParseMetaCache* pMetaCache);
 int32_t reserveTSMAInfoInCache(int32_t acctId, const char* pDb, const char* pTsmaName, SParseMetaCache* pMetaCache);
-int32_t reserveVSubTableInCache(int32_t acctId, const char* pDb, const char* pTable, SParseMetaCache* pMetaCache);
 int32_t reserveVStbRefDbsInCache(int32_t acctId, const char* pDb, const char* pTable, SParseMetaCache* pMetaCache);
 int32_t getTableMetaFromCache(SParseMetaCache* pMetaCache, const SName* pName, STableMeta** pMeta);
 int32_t getTableNameFromCache(SParseMetaCache* pMetaCache, const SName* pName, char* pTbName);
@@ -180,12 +170,13 @@ int32_t getUserAuthFromCache(SParseMetaCache* pMetaCache, SUserAuthInfo* pAuthRe
 int32_t getUdfInfoFromCache(SParseMetaCache* pMetaCache, const char* pFunc, SFuncInfo* pInfo);
 int32_t getTableIndexFromCache(SParseMetaCache* pMetaCache, const SName* pName, SArray** pIndexes);
 int32_t getTableCfgFromCache(SParseMetaCache* pMetaCache, const SName* pName, STableCfg** pOutput);
+int32_t getVStbRefDbsFromCache(SParseMetaCache* pMetaCache, const SName* pName, SArray** pOutput);
 int32_t getDnodeListFromCache(SParseMetaCache* pMetaCache, SArray** pDnodes);
 void    destoryParseMetaCache(SParseMetaCache* pMetaCache, bool request);
+// collectMetaKey is declared in parser.h (included above)
 int32_t createSelectStmtImpl(bool isDistinct, SNodeList* pProjectionList, SNode* pTable, SNodeList* pHint, SNode** ppSelect);
 int32_t getTableTsmasFromCache(SParseMetaCache* pMetaCache, const SName* pTbName, SArray** pTsmas);
 int32_t getTsmaFromCache(SParseMetaCache* pMetaCache, const SName* pTsmaName, STableTSMAInfo** pTsma);
-
 /**
  * @brief return a - b with overflow check
  * @retval val range between [INT64_MIN, INT64_MAX]

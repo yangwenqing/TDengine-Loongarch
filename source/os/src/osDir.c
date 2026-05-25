@@ -94,6 +94,13 @@ typedef struct dirent TdDirEntry;
 
 #define TDDIRMAXLEN 1024
 
+#ifdef WINDOWS
+static bool taosDirEntryIsReparsePoint(TdDirEntryPtr pDirEntry) {
+  if (pDirEntry == NULL) return false;
+  return (pDirEntry->findFileData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+#endif
+
 void taosRemoveDir(const char *dirname) {
   TdDirPtr pDir = taosOpenDir(dirname);
   if (pDir == NULL) return;
@@ -106,6 +113,11 @@ void taosRemoveDir(const char *dirname) {
     (void)snprintf(filename, sizeof(filename), "%s%s%s", dirname, TD_DIRSEP, taosGetDirEntryName(de));
     if (taosDirEntryIsDir(de)) {
       taosRemoveDir(filename);
+#ifdef WINDOWS
+    } else if (taosDirEntryIsReparsePoint(de)) {
+      // Remove junction/symlink directory without following it
+      TAOS_UNUSED(RemoveDirectoryA(filename));
+#endif
     } else {
       TAOS_UNUSED(taosRemoveFile(filename));
       // printf("file:%s is removed\n", filename);
@@ -542,8 +554,11 @@ bool taosDirEntryIsDir(TdDirEntryPtr pDirEntry) {
     return false;
   }
 #ifdef WINDOWS
+  if (pDirEntry->findFileData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+    return false;
+  }
   return (pDirEntry->findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-#elif defined(TD_ASTRA) // TD_ASTRA_TODO
+#elif defined(TD_ASTRA)  // TD_ASTRA_TODO
   return ((dirent *)pDirEntry)->d_mode == 1;  // DIRECTORY_ENTRY;
 #else
   return (((dirent *)pDirEntry)->d_type & DT_DIR) != 0;
@@ -657,55 +672,4 @@ _OVER:
   *size = totalSize;
   TAOS_UNUSED(taosCloseDir(&pDir));
   return code;
-}
-
-
-void* taosLoadDll(const char* fileName) {
-#if defined(WINDOWS)
-  void* handle = LoadLibraryA(fileName);
-#else
-  void* handle = dlopen(fileName, RTLD_LAZY);
-#endif
-
-  if (handle == NULL) {
-    if (errno != 0) {
-      terrno = TAOS_SYSTEM_ERROR(errno);
-    } else {
-      terrno = TSDB_CODE_DLL_NOT_LOAD;
-    }
-  }
-
-  return handle;
-}
-
-void taosCloseDll(void* handle) {
-  if (handle == NULL) return;
-
-#if defined(WINDOWS)
-  FreeLibrary((HMODULE)handle);
-#else
-  if (dlclose(handle) != 0 && errno != 0) {
-      terrno = TAOS_SYSTEM_ERROR(errno);
-  }
-#endif
-}
-
-void* taosLoadDllFunc(void* handle, const char* funcName) {
-  if (handle == NULL) return NULL;
-
-#if defined(WINDOWS)
-  void *fptr = GetProcAddress((HMODULE)handle, funcName);
-#else
-  void *fptr = dlsym(handle, funcName);
-#endif
-
-  if (handle == NULL) {
-    if (errno != 0) {
-      terrno = TAOS_SYSTEM_ERROR(errno);
-    } else {
-      terrno = TSDB_CODE_DLL_FUNC_NOT_LOAD;
-    }
-  }
-
-  return fptr;
 }

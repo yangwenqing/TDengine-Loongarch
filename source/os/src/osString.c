@@ -359,6 +359,9 @@ iconv_t taosAcquireConv(int32_t *idx, ConvType type, void* charsetCxt) {
     terrno = TSDB_CODE_INVALID_PARA;
     return (iconv_t)NULL;
   }
+
+  int32_t retryLimit = 100, i = 0;
+
   if (charsetCxt == NULL){
     charsetCxt = tsCharsetCxt;
   }
@@ -381,6 +384,11 @@ iconv_t taosAcquireConv(int32_t *idx, ConvType type, void* charsetCxt) {
   }
 
   while (true) {
+    if (i++ >= retryLimit) {
+      uError("taosAcquireConv retry limit reached");
+      return (iconv_t)-1;
+    }
+
     int32_t used = atomic_add_fetch_32(&info->convUsed[type], 1);
     if (used > info->gConvMaxNum[type]) {
       (void)atomic_sub_fetch_32(&info->convUsed[type], 1);
@@ -391,7 +399,7 @@ iconv_t taosAcquireConv(int32_t *idx, ConvType type, void* charsetCxt) {
     break;
   }
 
-  int32_t startId = taosGetSelfPthreadId() % info->gConvMaxNum[type];
+  int32_t startId = ((uint32_t)(taosGetSelfPthreadId())) % info->gConvMaxNum[type];
   while (true) {
     if (info->gConv[type][startId].inUse) {
       startId = (startId + 1) % info->gConvMaxNum[type];
@@ -1035,4 +1043,69 @@ int64_t tsnprintf(char *dst, int64_t size, const char *format, ...) {
   } else {
     return ret;
   }
+}
+
+/* optimized for performance */
+#ifndef likely
+#if defined(__GNUC__) || defined(__clang__)
+#define likely(x)   __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+#else
+/* Fallback for MSVC and other compilers without __builtin_expect */
+#define likely(x)   (x)
+#define unlikely(x) (x)
+#endif
+#endif
+
+void sliceInit(TSlice *p, char *buf, int32_t cap) {
+  if (unlikely(p == NULL || buf == NULL || cap <= 0)) {
+    terrno = TSDB_CODE_INVALID_PARA;
+    return;
+  }
+
+  p->buf = buf;
+  p->len = 0;
+  p->cap = cap;
+  p->buf[0] = '\0';
+}
+
+int32_t sliceAppend(TSlice *p, const char *src, int32_t len) {
+  if (unlikely(p == NULL || src == NULL || len < 0)) {
+    terrno = TSDB_CODE_INVALID_PARA;
+    return terrno;
+  }
+
+  char *buf = p->buf;
+  if (unlikely(buf == NULL || p->cap <= 0)) {
+    terrno = TSDB_CODE_INVALID_PARA;
+    return terrno;
+  }
+
+  if (unlikely(len == 0)) return TSDB_CODE_INVALID_PARA;
+
+  /* use local copies to minimize memory accesses */
+  int32_t cap = p->cap;
+  int32_t cur = p->len;
+  int32_t avail = cap - cur - 1; /* space for terminating NUL */
+
+  if (unlikely(avail < len)) {
+    return TSDB_CODE_OUT_OF_RANGE;
+  }
+
+  /* single memcpy and single update of struct members */
+  memcpy(buf + cur, src, (size_t)len);
+  cur += len;
+  p->len = cur;
+  buf[cur] = '\0';
+
+  return 0;
+}
+
+char *sliceGet(TSlice *p, int32_t *len) {
+  if (unlikely(p == NULL)) {
+    terrno = TSDB_CODE_INVALID_PARA;
+    return NULL;
+  }
+  if (len) *len = p->len;
+  return p->buf;
 }

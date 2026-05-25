@@ -283,8 +283,11 @@ int32_t initRowKey(SRowKey* pKey, int64_t ts, int32_t numOfPks, int32_t type, in
       }
     } else {
       pKey->pks[0].nData = 0;
-      pKey->pks[0].pData = taosMemoryCalloc(1, len);
-      TSDB_CHECK_NULL(pKey->pks[0].pData, code, lino, _end, terrno);
+
+      if (pKey->pks[0].pData == NULL) {
+        pKey->pks[0].pData = taosMemoryCalloc(1, len);
+        TSDB_CHECK_NULL(pKey->pks[0].pData, code, lino, _end, terrno);
+      }
 
       if (!asc) {
         pKey->numOfPKs = 2;
@@ -304,6 +307,7 @@ void clearRowKey(SRowKey* pKey) {
     return;
   }
   taosMemoryFreeClear(pKey->pks[0].pData);
+  taosMemoryFreeClear(pKey->pks[1].pData);
 }
 
 static int32_t initLastProcKey(STableBlockScanInfo* pScanInfo, const STsdbReader* pReader) {
@@ -481,11 +485,17 @@ void resetAllDataBlockScanInfo(SSHashObj* pTableMap, int64_t ts, int32_t step) {
     pInfo->delSkyline = NULL;
     pInfo->lastProcKey.ts = ts;
     // todo check the nextProcKey info
-    pInfo->sttKeyInfo.nextProcKey.ts = ts + step;
+    if ((ts == INT64_MAX && step > 0) || (ts == INT64_MIN && step < 0)) {
+      tsdbError("%s nextProcKey ts overflow, ts:%" PRId64 ", step:%" PRId32,
+                __func__, ts, step);
+    } else {
+      pInfo->sttKeyInfo.nextProcKey.ts = ts + step;
+    }
   }
 }
 
-void clearBlockScanInfo(STableBlockScanInfo* p) {
+// keep the lastProcKey/sttRange/nextProcKey info
+void clearBlockScanInfoLoadInfo(STableBlockScanInfo* p) {
   if (p == NULL) {
     return;
   }
@@ -513,6 +523,14 @@ void clearBlockScanInfo(STableBlockScanInfo* p) {
   p->pMemDelData = NULL;
   taosArrayDestroy(p->pFileDelData);
   p->pFileDelData = NULL;
+}
+
+void clearBlockScanInfo(STableBlockScanInfo* p) {
+  if (p == NULL) {
+    return;
+  }
+
+  clearBlockScanInfoLoadInfo(p);
 
   clearRowKey(&p->lastProcKey);
   clearRowKey(&p->sttRange.skey);
